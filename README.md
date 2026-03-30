@@ -99,27 +99,54 @@ Prueba la demo en línea del proyecto original para ver MiroFish en acción:
 </div>
 ---
 
-## 🎯 Casos de Uso para el Mercado Hispano
+## 🎯 Casos de Uso — Predice Cualquier Cosa
 
-### 🏥 Seguros de Salud en Florida
-Simula cómo reaccionará tu comunidad latina ante cambios de primas, nuevas regulaciones o campañas. Identifica objeciones antes de que existan y optimiza tu estrategia de comunicación.
+MiroFish no tiene límites de industria. Si puedes describir 
+el contexto en texto, puedes simularlo.
 
-**Ejemplo de pregunta:** *"¿Cómo reaccionarán los latinos en Florida ante un aumento del 15% en primas de salud en 2025? ¿Qué mensaje en redes sociales generará más confianza?"*
+### 🏪 Negocios y Emprendimiento
+Simula cómo reaccionará el mercado ante el lanzamiento de 
+tu producto o servicio antes de invertir un peso.
 
-### ⚖️ Servicios de Inmigración
-Predice el impacto de cambios de política migratoria en tu comunidad objetivo. Genera estrategias de comunicación empáticas basadas en comportamiento simulado real de tu audiencia.
+### 📱 Marketing y Publicidad
+Prueba campañas publicitarias con audiencias simuladas. 
+Descubre qué mensajes conectan y cuáles generan rechazo 
+antes de gastar en pauta.
 
-**Ejemplo de pregunta:** *"¿Cómo se comportará la comunidad venezolana en Miami ante las nuevas políticas de asilo? ¿Qué servicios serán más demandados?"*
+### 🎯 Comportamiento del Consumidor
+Entiende los patrones de decisión de compra de tu cliente 
+ideal. Simula objeciones, motivaciones y puntos de dolor.
 
-### 🏠 Real Estate Hispano
-Simula cómo evoluciona el mercado en una zona específica ante cambios de tasas hipotecarias. Entiende los factores emocionales y prácticos que mueven la decisión de compra del cliente latino.
+### 📊 Análisis de Tendencias
+Predice cómo evolucionará una tendencia en tu mercado. 
+Anticípate a la competencia con datos simulados.
 
-**Ejemplo de pregunta:** *"¿Cómo afectará la subida de tasas al comportamiento de compradores latinos en el área de Orlando para 2025?"*
+### ⚖️ Servicios Legales e Inmigración
+Simula el impacto de cambios regulatorios en tu comunidad 
+objetivo. Genera estrategias de comunicación empáticas.
 
-### 📱 Marketing Digital y Contenido Viral
-Antes de lanzar una campaña o publicar contenido, simula la reacción de tu audiencia objetivo. Optimiza el hook, el mensaje y el call-to-action antes de gastar en pauta.
+### 🏥 Seguros y Salud
+Predice reacciones ante cambios de primas o nuevas pólizas. 
+Identifica objeciones antes de que existan.
 
-**Ejemplo de pregunta:** *"¿Qué ángulo de contenido sobre seguros de salud generará más engagement en la comunidad latina en TikTok e Instagram?"*
+### 🏠 Real Estate
+Simula el comportamiento del mercado inmobiliario ante 
+cambios económicos. Entiende la psicología del comprador.
+
+### 🎓 Educación e Investigación
+Modela comportamientos sociales para estudios académicos. 
+Simula escenarios históricos o futuros.
+
+### 🏛️ Políticas Públicas
+Ensaya el impacto de decisiones de gobierno antes de 
+implementarlas. Reduce el riesgo en la toma de decisiones.
+
+### 🎬 Contenido y Entretenimiento
+Predice finales alternativos de historias. Simula cómo 
+reaccionará tu audiencia ante nuevo contenido.
+
+> **Regla de oro:** Si puedes describir el contexto 
+> en un párrafo, MiroFish puede simularlo.
 
 ---
 
