@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="./static/image/MiroFish_logo_compressed.jpeg" alt="MiroFish Logo" width="75%"/>
+<img src="./static/image/MiroFish_ESP_logo.png" alt="MiroFish ESP Logo" width="75%"/>
 
 <a href="https://github.com/666ghj/MiroFish" target="_blank"><img src="https://img.shields.io/badge/Basado%20en-MiroFish%20⭐45k-DAA520?style=flat-square" alt="Basado en MiroFish"/></a>
 
