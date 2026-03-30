@@ -76,20 +76,19 @@ Prueba la demo en línea del proyecto original para ver MiroFish en acción:
 <div align="center">
 <table>
 <tr>
-<td><img src="./static/image/screenshots/01_portada.png" alt="Portada en Español" width="100%"/></td>
-<td><img src="./static/image/screenshots/02_historial.png" alt="Historial de Simulaciones" width="100%"/></td>
+<td><img src="./static/image/screenshots/Captura de pantalla 2026-03-30 a la(s) 16.37.37.png" alt="Portada en Español" width="100%"/></td>
+<td><img src="./static/image/screenshots/Captura de pantalla 2026-03-30 a la(s) 16.37.47.png" alt="Historial de Simulaciones" width="100%"/></td>
 </tr>
 <tr>
-<td><img src="./static/image/screenshots/03_grafo.png" alt="Grafo de Relaciones" width="100%"/></td>
-<td><img src="./static/image/screenshots/04_agentes.png" alt="Configuración de Agentes" width="100%"/></td>
+<td><img src="./static/image/screenshots/Captura de pantalla 2026-03-27 a la(s) 0.16.45.png" alt="Grafo de Relaciones" width="100%"/></td>
+<td><img src="./static/image/screenshots/Captura de pantalla 2026-03-27 a la(s) 11.01.55.png" alt="Configuración de Agentes" width="100%"/></td>
 </tr>
 <tr>
-<td><img src="./static/image/screenshots/05_informe.png" alt="Generación de Informe" width="100%"/></td>
-<td><img src="./static/image/screenshots/06_encuesta.png" alt="Encuesta a Agentes" width="100%"/></td>
+<td><img src="./static/image/screenshots/Captura de pantalla 2026-03-27 a la(s) 9.45.45.png" alt="Generación de Informe" width="100%"/></td>
+<td><img src="./static/image/screenshots/Captura de pantalla 2026-03-27 a la(s) 11.11.38.png" alt="Encuesta a Agentes" width="100%"/></td>
 </tr>
 </table>
 </div>
-
 ---
 
 ## 🎯 Casos de Uso para el Mercado Hispano
