@@ -1101,7 +1101,7 @@ class ZepToolsService:
         
         Descompone un problema complejo en múltiples subpreguntas que se pueden recuperar de forma independiente
         """
-        system_prompt = """Responde siempre en español latino. No uses inglés en ningún caso.
+        system_prompt = """Responde contenido narrativo en español latino. Conserva claves JSON y nombres técnicos exactamente cuando el sistema los requiera.
 
 Eres un experto profesional en análisis de preguntas. Tu tarea es descomponer una pregunta compleja en múltiples subpreguntas que se puedan observar de forma independiente en el mundo simulado.
 
@@ -1579,7 +1579,7 @@ Retorna la lista de subpreguntas en formato JSON."""
             }
             agent_summaries.append(summary)
         
-        system_prompt = """Responde siempre en español latino. No uses inglés en ningún caso.
+        system_prompt = """Responde contenido narrativo en español latino. Conserva claves JSON y nombres técnicos exactamente cuando el sistema los requiera.
 
 Eres un experto en planificación de entrevistas. Tu tarea es seleccionar los objetos más adecuados para entrevistar de la lista de Agents simulados, según los requisitos de la entrevista.
 
@@ -1645,7 +1645,7 @@ Por favor seleccione hasta {max_agents} Agents más adecuados para entrevistar y
         
         agent_roles = [a.get("profession", "desconocido") for a in selected_agents]
         
-        system_prompt = """Responde siempre en español latino. No uses inglés en ningún caso.
+        system_prompt = """Responde contenido narrativo en español latino. Conserva claves JSON y nombres técnicos exactamente cuando el sistema los requiera.
 
 Eres un periodista/entrevistador profesional. Genera 3-5 preguntas de entrevista profunda según los requisitos de la entrevista.
 
@@ -1701,7 +1701,7 @@ Por favor genere 3-5 preguntas de entrevista."""
         for interview in interviews:
             interview_texts.append(f"【{interview.agent_name}（{interview.agent_role}）】\n{interview.response[:500]}")
         
-        system_prompt = """Responde siempre en español latino. No uses inglés en ningún caso.
+        system_prompt = """Responde contenido narrativo en español latino. Conserva claves JSON y nombres técnicos exactamente cuando el sistema los requiera.
 
 Eres un editor de noticias profesional. Por favor genera un resumen de entrevista basado en las respuestas de múltiples entrevistados.
 

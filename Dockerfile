@@ -23,7 +23,12 @@ RUN npm ci \
 # 复制项目源码
 COPY . .
 
+ENV FLASK_DEBUG=false
+ENV NODE_ENV=production
+
+RUN npm run build --prefix frontend
+
 EXPOSE 3000 5001
 
-# 同时启动前后端（开发模式）
-CMD ["npm", "run", "dev"]
+# Iniciar backend y frontend compilado
+CMD ["npm", "run", "start"]

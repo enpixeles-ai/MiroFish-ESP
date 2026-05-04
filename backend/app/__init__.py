@@ -3,6 +3,7 @@ MiroFish Backend - Fábrica de aplicaciones Flask
 """
 
 import os
+import json
 import warnings
 
 # Suprimir advertencias de resource_tracker de multiprocessing (provenientes de librerías de terceros como transformers)
@@ -39,8 +40,8 @@ def create_app(config_class=Config):
         logger.info("Iniciando MiroFish Backend...")
         logger.info("=" * 50)
     
-    # Habilitar CORS
-    CORS(app, resources={r"/api/*": {"origins": "*"}})
+    # Habilitar CORS solo para orígenes configurados
+    CORS(app, resources={r"/api/*": {"origins": app.config.get('CORS_ORIGINS', [])}})
     
     # Registrar función de limpieza de procesos de simulación (asegurar que todos los procesos de simulación terminen al cerrar el servidor)
     from .services.simulation_runner import SimulationRunner
@@ -53,12 +54,18 @@ def create_app(config_class=Config):
     def log_request():
         logger = get_logger('mirofish.request')
         logger.debug(f"Solicitud: {request.method} {request.path}")
-        if request.content_type and 'json' in request.content_type:
+        if app.config.get('DEBUG') and request.content_type and 'json' in request.content_type:
             logger.debug(f"Cuerpo de solicitud: {request.get_json(silent=True)}")
     
     @app.after_request
     def log_response(response):
         logger = get_logger('mirofish.request')
+        if not app.config.get('DEBUG') and response.is_json:
+            data = response.get_json(silent=True)
+            if isinstance(data, dict) and "traceback" in data:
+                data.pop("traceback", None)
+                response.set_data(json.dumps(data, ensure_ascii=False))
+                response.content_length = len(response.get_data())
         logger.debug(f"Respuesta: {response.status_code}")
         return response
     
@@ -77,4 +84,3 @@ def create_app(config_class=Config):
         logger.info("MiroFish Backend iniciado correctamente")
     
     return app
-

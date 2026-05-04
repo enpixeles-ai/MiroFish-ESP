@@ -24,22 +24,22 @@ from .zep_entity_reader import EntityNode, ZepEntityReader
 
 logger = get_logger('mirofish.simulation_config')
 
-# Configuración de horarios chinos (hora de Pekín)
-CHINA_TIMEZONE_CONFIG = {
+# Perfil horario por defecto para audiencia latina/hispana en USA o LatAm.
+LATAM_US_TIMEZONE_CONFIG = {
     # Franja de madrugada (casi sin actividad)
-    "dead_hours": [0, 1, 2, 3, 4, 5],
+    "dead_hours": [1, 2, 3, 4, 5],
     # Franja matutina (actividad gradual)
-    "morning_hours": [6, 7, 8],
+    "morning_hours": [6, 7, 8, 9],
     # Franja laboral
-    "work_hours": [9, 10, 11, 12, 13, 14, 15, 16, 17, 18],
+    "work_hours": [9, 10, 11, 12, 13, 14, 15, 16, 17],
     # Pico nocturno (máxima actividad)
-    "peak_hours": [19, 20, 21, 22],
+    "peak_hours": [18, 19, 20, 21, 22],
     # Franja nocturna tardía (actividad decreciente)
     "night_hours": [23],
     # Coeficientes de actividad
     "activity_multipliers": {
         "dead": 0.05,      # Madrugada: casi nadie activo
-        "morning": 0.4,    # Mañana: actividad gradual
+        "morning": 0.45,   # Mañana: actividad gradual
         "work": 0.7,       # Franja laboral: actividad media
         "peak": 1.5,       # Pico nocturno
         "night": 0.5       # Noche tardía: actividad en descenso
@@ -81,7 +81,7 @@ class AgentActivityConfig:
 
 @dataclass  
 class TimeSimulationConfig:
-    """Configuración de simulación de tiempo (basada en los hábitos horarios chinos)"""
+    """Configuración de simulación de tiempo para audiencia latina/hispana."""
     # Duración total de la simulación (en horas simuladas)
     total_simulation_hours: int = 72  # Simulación predeterminada de 72 horas (3 días)
     
@@ -92,17 +92,17 @@ class TimeSimulationConfig:
     agents_per_hour_min: int = 5
     agents_per_hour_max: int = 20
     
-    # Horario pico (19-22 h nocturno, cuando los usuarios chinos son más activos)
-    peak_hours: List[int] = field(default_factory=lambda: [19, 20, 21, 22])
+    # Horario pico nocturno habitual en redes sociales
+    peak_hours: List[int] = field(default_factory=lambda: [18, 19, 20, 21, 22])
     peak_activity_multiplier: float = 1.5
     
-    # Horario valle (madrugada 0-5 h, casi sin actividad)
-    off_peak_hours: List[int] = field(default_factory=lambda: [0, 1, 2, 3, 4, 5])
+    # Horario valle (madrugada 1-5 h, casi sin actividad)
+    off_peak_hours: List[int] = field(default_factory=lambda: [1, 2, 3, 4, 5])
     off_peak_activity_multiplier: float = 0.05  # Madrugada: actividad extremadamente baja
     
     # Franja matutina
-    morning_hours: List[int] = field(default_factory=lambda: [6, 7, 8])
-    morning_activity_multiplier: float = 0.4
+    morning_hours: List[int] = field(default_factory=lambda: [6, 7, 8, 9])
+    morning_activity_multiplier: float = 0.45
     
     # Franja laboral
     work_hours: List[int] = field(default_factory=lambda: [9, 10, 11, 12, 13, 14, 15, 16, 17, 18])
@@ -547,11 +547,11 @@ class SimulationConfigGenerator:
 Genera el JSON de configuración de tiempo.
 
 ### Principios básicos (solo de referencia; ajusta según el evento concreto y el grupo participante):
-- El grupo de usuarios es chino; debe ajustarse a los hábitos horarios de la hora de Pekín
-- De 0 a 5 h (madrugada): casi sin actividad (coeficiente 0.05)
-- De 6 a 8 h (mañana): actividad gradualmente creciente (coeficiente 0.4)
-- De 9 a 18 h (jornada laboral): actividad media (coeficiente 0.7)
-- De 19 a 22 h (noche): horario pico (coeficiente 1.5)
+- El grupo de usuarios por defecto es latino/hispano en USA o LatAm; usa la zona horaria local inferida del escenario
+- De 1 a 5 h (madrugada): casi sin actividad (coeficiente 0.05)
+- De 6 a 9 h (mañana): actividad gradualmente creciente (coeficiente 0.45)
+- De 9 a 17 h (jornada laboral): actividad media (coeficiente 0.7)
+- De 18 a 22 h (noche): horario pico (coeficiente 1.5)
 - Después de las 23 h: actividad decreciente (coeficiente 0.5)
 - Patrón general: madrugada baja, mañana creciente, jornada laboral media, noche en pico
 - **Importante**: los valores de ejemplo a continuación son solo de referencia; debes ajustar las franjas horarias según la naturaleza del evento y las características del grupo participante
@@ -566,10 +566,10 @@ Ejemplo:
     "minutes_per_round": 60,
     "agents_per_hour_min": 5,
     "agents_per_hour_max": 50,
-    "peak_hours": [19, 20, 21, 22],
-    "off_peak_hours": [0, 1, 2, 3, 4, 5],
-    "morning_hours": [6, 7, 8],
-    "work_hours": [9, 10, 11, 12, 13, 14, 15, 16, 17, 18],
+    "peak_hours": [18, 19, 20, 21, 22],
+    "off_peak_hours": [1, 2, 3, 4, 5],
+    "morning_hours": [6, 7, 8, 9],
+    "work_hours": [9, 10, 11, 12, 13, 14, 15, 16, 17],
     "reasoning": "Explicación de la configuración de tiempo para este evento"
 }}
 
@@ -584,7 +584,7 @@ Descripción de campos:
 - work_hours (array int): franja laboral
 - reasoning (string): breve explicación de por qué se eligió esta configuración"""
 
-        system_prompt = "Responde siempre en español latino. No uses inglés en ningún caso. Eres un experto en simulación de redes sociales. Devuelve formato JSON puro. La configuración de tiempo debe ajustarse a los hábitos horarios latinoamericanos."
+        system_prompt = "Responde razonamientos en español latino. Devuelve JSON puro. Conserva nombres de claves JSON y valores enum exactamente como se solicitan. La configuración de tiempo debe ajustarse a audiencias latinas/hispanas en USA o LatAm según el escenario."
         
         try:
             return self._call_llm_with_retry(prompt, system_prompt)
@@ -593,17 +593,17 @@ Descripción de campos:
             return self._get_default_time_config(num_entities)
     
     def _get_default_time_config(self, num_entities: int) -> Dict[str, Any]:
-        """Obtener la configuración de tiempo predeterminada (hábitos horarios chinos)"""
+        """Obtener la configuración de tiempo predeterminada para audiencia latina/hispana."""
         return {
             "total_simulation_hours": 72,
             "minutes_per_round": 60,  # 1 hora por ronda para acelerar el flujo de tiempo
             "agents_per_hour_min": max(1, num_entities // 15),
             "agents_per_hour_max": max(5, num_entities // 5),
-            "peak_hours": [19, 20, 21, 22],
-            "off_peak_hours": [0, 1, 2, 3, 4, 5],
-            "morning_hours": [6, 7, 8],
-            "work_hours": [9, 10, 11, 12, 13, 14, 15, 16, 17, 18],
-            "reasoning": "Usando configuración horaria china predeterminada (1 hora por ronda)"
+            "peak_hours": [18, 19, 20, 21, 22],
+            "off_peak_hours": [1, 2, 3, 4, 5],
+            "morning_hours": [6, 7, 8, 9],
+            "work_hours": [9, 10, 11, 12, 13, 14, 15, 16, 17],
+            "reasoning": "Usando configuración horaria predeterminada para audiencia latina/hispana (1 hora por ronda)"
         }
     
     def _parse_time_config(self, result: Dict[str, Any], num_entities: int) -> TimeSimulationConfig:
@@ -700,7 +700,7 @@ Devuelve el formato JSON (sin markdown):
     "reasoning": "<breve explicación>"
 }}"""
 
-        system_prompt = "Responde siempre en español latino. No uses inglés en ningún caso. Eres un experto en análisis de opinión pública. Devuelve formato JSON puro. Ten en cuenta que poster_type debe coincidir exactamente con los tipos de entidad disponibles."
+        system_prompt = "Responde contenido narrativo en español latino. Devuelve formato JSON puro. Conserva nombres de claves JSON y poster_type exactamente como aparecen en los tipos de entidad disponibles."
         
         try:
             return self._call_llm_with_retry(prompt, system_prompt)
@@ -838,7 +838,7 @@ Requisito de simulación: {simulation_requirement}
 
 ## Tarea
 Genera la configuración de actividad para cada entidad. Considera:
-- **Horarios acordes a los hábitos chinos**: de 0 a 5 h (madrugada) casi sin actividad; de 19 a 22 h (noche) máxima actividad
+- **Horarios acordes a audiencias latinas/hispanas**: de 1 a 5 h (madrugada) casi sin actividad; de 18 a 22 h (noche) máxima actividad
 - **Organismos oficiales** (University/GovernmentAgency): actividad baja (0.1-0.3), activos en horario laboral (9-17), respuesta lenta (60-240 min), influencia alta (2.5-3.0)
 - **Medios de comunicación** (MediaOutlet): actividad media (0.4-0.6), activos todo el día (8-23), respuesta rápida (5-30 min), influencia alta (2.0-2.5)
 - **Personas** (Student/Person/Alumni): actividad alta (0.6-0.9), principalmente activos de noche (18-23), respuesta rápida (1-15 min), influencia baja (0.8-1.2)
@@ -852,7 +852,7 @@ Devuelve el formato JSON (sin markdown):
             "activity_level": <0.0-1.0>,
             "posts_per_hour": <frecuencia de publicaciones>,
             "comments_per_hour": <frecuencia de comentarios>,
-            "active_hours": [<lista de horas activas, considerando hábitos horarios chinos>],
+            "active_hours": [<lista de horas activas, considerando el mercado y zona horaria del escenario>],
             "response_delay_min": <demora mínima de respuesta en minutos>,
             "response_delay_max": <demora máxima de respuesta en minutos>,
             "sentiment_bias": <-1.0 a 1.0>,
@@ -863,7 +863,7 @@ Devuelve el formato JSON (sin markdown):
     ]
 }}"""
 
-        system_prompt = "Responde siempre en español latino. No uses inglés en ningún caso. Eres un experto en análisis del comportamiento en redes sociales. Devuelve JSON puro. La configuración debe ajustarse a los hábitos horarios latinoamericanos."
+        system_prompt = "Responde razonamientos en español latino. Devuelve JSON puro. Conserva nombres de claves JSON y valores enum exactamente como se solicitan. La configuración debe ajustarse a los hábitos del mercado objetivo."
         
         try:
             result = self._call_llm_with_retry(prompt, system_prompt)
@@ -902,7 +902,7 @@ Devuelve el formato JSON (sin markdown):
         return configs
     
     def _generate_agent_config_by_rule(self, entity: EntityNode) -> Dict[str, Any]:
-        """Generar configuración de un solo Agente basada en reglas (hábitos horarios chinos)"""
+        """Generar configuración de un solo Agente basada en reglas para audiencia latina/hispana."""
         entity_type = (entity.get_entity_type() or "Unknown").lower()
         
         if entity_type in ["university", "governmentagency", "ngo"]:
@@ -984,4 +984,3 @@ Devuelve el formato JSON (sin markdown):
                 "influence_weight": 1.0
             }
     
-

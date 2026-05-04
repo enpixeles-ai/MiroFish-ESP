@@ -22,6 +22,9 @@ logger = get_logger('mirofish.api.simulation')
 # Prefijo de optimización del prompt de entrevista
 # Agregar este prefijo evita que el Agent llame a herramientas, responde directamente con texto
 INTERVIEW_PROMPT_PREFIX = "Considerando tu personaje, todos tus recuerdos y acciones pasadas, respóndeme directamente con texto sin llamar a ninguna herramienta:"
+MAX_INTERVIEW_BATCH_SIZE = int(os.environ.get("MAX_INTERVIEW_BATCH_SIZE", "60"))
+MAX_INTERVIEW_PROMPT_CHARS = int(os.environ.get("MAX_INTERVIEW_PROMPT_CHARS", "4000"))
+MAX_INTERVIEW_TIMEOUT_SECONDS = int(os.environ.get("MAX_INTERVIEW_TIMEOUT_SECONDS", "600"))
 
 
 def optimize_interview_prompt(prompt: str) -> str:
@@ -40,6 +43,23 @@ def optimize_interview_prompt(prompt: str) -> str:
     if prompt.startswith(INTERVIEW_PROMPT_PREFIX):
         return prompt
     return f"{INTERVIEW_PROMPT_PREFIX}{prompt}"
+
+
+def reset_simulation_runtime_state(state):
+    """Limpiar campos de ejecución antes de una corrida nueva."""
+    state.error = None
+    state.current_round = 0
+    state.twitter_status = "not_started"
+    state.reddit_status = "not_started"
+
+
+def mark_simulation_running(state):
+    """Actualizar estado persistente al iniciar una corrida."""
+    state.status = SimulationStatus.RUNNING
+    state.error = None
+    state.current_round = 0
+    state.twitter_status = "running" if state.enable_twitter else "disabled"
+    state.reddit_status = "running" if state.enable_reddit else "disabled"
 
 
 # ============== Interfaces de lectura de entidades ==============
@@ -773,6 +793,63 @@ def get_simulation(simulation_id: str):
         
     except Exception as e:
         logger.error(f"Fallo al obtener el estado de la simulación: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+
+
+@simulation_bp.route('/<simulation_id>', methods=['DELETE'])
+def delete_simulation(simulation_id: str):
+    """Eliminar una simulación histórica que no esté corriendo activamente."""
+    try:
+        force = request.args.get('force', 'false').lower() == 'true'
+        manager = SimulationManager()
+        state = manager.get_simulation(simulation_id)
+
+        if not state:
+            return jsonify({
+                "success": False,
+                "error": f"La simulación no existe: {simulation_id}"
+            }), 404
+
+        run_state = SimulationRunner.get_run_state(simulation_id)
+        is_running = bool(
+            run_state and run_state.runner_status in [RunnerStatus.RUNNING, RunnerStatus.STARTING]
+        )
+
+        if is_running and not force:
+            return jsonify({
+                "success": False,
+                "error": "La simulación está en ejecución. Detenla antes de eliminarla."
+            }), 409
+
+        if is_running and force:
+            try:
+                SimulationRunner.stop_simulation(simulation_id)
+            except Exception as e:
+                logger.warning(f"No se pudo detener la simulación antes de eliminar: {simulation_id}, error={e}")
+
+        result = manager.delete_simulation(simulation_id)
+        SimulationRunner._run_states.pop(simulation_id, None)
+        SimulationRunner._processes.pop(simulation_id, None)
+        SimulationRunner._action_queues.pop(simulation_id, None)
+        SimulationRunner._monitor_threads.pop(simulation_id, None)
+
+        return jsonify({
+            "success": True,
+            "data": result
+        })
+
+    except ValueError as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 400
+
+    except Exception as e:
+        logger.error(f"Fallo al eliminar la simulación: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e),
@@ -1567,6 +1644,7 @@ def start_simulation():
 
                 # El proceso no existe o ya terminó, restablecer el estado a ready
                 logger.info(f"La preparación de la simulación {simulation_id} está completa, restableciendo estado a ready (estado anterior: {state.status.value})")
+                reset_simulation_runtime_state(state)
                 state.status = SimulationStatus.READY
                 manager._save_simulation_state(state)
             else:
@@ -1605,7 +1683,7 @@ def start_simulation():
         )
         
         # Actualizar estado de la simulación
-        state.status = SimulationStatus.RUNNING
+        mark_simulation_running(state)
         manager._save_simulation_state(state)
         
         response_data = run_state.to_dict()
@@ -1672,12 +1750,25 @@ def stop_simulation():
         manager = SimulationManager()
         state = manager.get_simulation(simulation_id)
         if state:
-            state.status = SimulationStatus.PAUSED
+            if run_state.runner_status.value == "failed":
+                state.status = SimulationStatus.FAILED
+                state.twitter_status = "completed" if run_state.twitter_completed else "failed"
+                state.reddit_status = "completed" if run_state.reddit_completed else "failed"
+                state.error = run_state.error or state.error
+            elif run_state.runner_status.value == "completed":
+                state.status = SimulationStatus.COMPLETED
+                state.twitter_status = "completed"
+                state.reddit_status = "completed"
+            else:
+                state.status = SimulationStatus.STOPPED
+                state.twitter_status = "stopped"
+                state.reddit_status = "stopped"
             manager._save_simulation_state(state)
         
         return jsonify({
             "success": True,
-            "data": run_state.to_dict()
+            "data": run_state.to_dict(),
+            "message": "La simulación ya no estaba activa" if run_state.runner_status.value in ["failed", "completed", "stopped"] else "Simulación detenida"
         })
         
     except ValueError as e:
@@ -2313,7 +2404,14 @@ def interview_agents_batch():
         simulation_id = data.get('simulation_id')
         interviews = data.get('interviews')
         platform = data.get('platform')  # Opcional: twitter/reddit/None
-        timeout = data.get('timeout', 300)
+        try:
+            timeout = int(data.get('timeout', 300))
+        except (TypeError, ValueError):
+            return jsonify({
+                "success": False,
+                "error": "timeout debe ser un número entero"
+            }), 400
+        timeout = max(5, min(timeout, MAX_INTERVIEW_TIMEOUT_SECONDS))
 
         if not simulation_id:
             return jsonify({
@@ -2327,12 +2425,20 @@ def interview_agents_batch():
                 "error": "Por favor proporcione interviews (lista de entrevistas)"
             }), 400
 
+        if len(interviews) > MAX_INTERVIEW_BATCH_SIZE:
+            return jsonify({
+                "success": False,
+                "error": f"El lote de entrevistas no puede superar {MAX_INTERVIEW_BATCH_SIZE} destinatarios"
+            }), 400
+
         # Validar el parámetro platform
         if platform and platform not in ("twitter", "reddit"):
             return jsonify({
                 "success": False,
                 "error": "El parámetro platform solo puede ser 'twitter' o 'reddit'"
             }), 400
+
+        sanitized_interviews = []
 
         # Validar cada ítem de entrevista
         for i, interview in enumerate(interviews):
@@ -2341,11 +2447,36 @@ def interview_agents_batch():
                     "success": False,
                     "error": f"El ítem {i+1} de la lista de entrevistas carece de agent_id"
                 }), 400
+            try:
+                agent_id = int(interview.get('agent_id'))
+            except (TypeError, ValueError):
+                return jsonify({
+                    "success": False,
+                    "error": f"agent_id del ítem {i+1} debe ser un entero"
+                }), 400
+            if agent_id < 0:
+                return jsonify({
+                    "success": False,
+                    "error": f"agent_id del ítem {i+1} no puede ser negativo"
+                }), 400
+
             if 'prompt' not in interview:
                 return jsonify({
                     "success": False,
                     "error": f"El ítem {i+1} de la lista de entrevistas carece de prompt"
                 }), 400
+            prompt = str(interview.get('prompt', '')).strip()
+            if not prompt:
+                return jsonify({
+                    "success": False,
+                    "error": f"prompt del ítem {i+1} no puede estar vacío"
+                }), 400
+            if len(prompt) > MAX_INTERVIEW_PROMPT_CHARS:
+                return jsonify({
+                    "success": False,
+                    "error": f"prompt del ítem {i+1} supera {MAX_INTERVIEW_PROMPT_CHARS} caracteres"
+                }), 400
+
             # Validar el platform de cada ítem (si existe)
             item_platform = interview.get('platform')
             if item_platform and item_platform not in ("twitter", "reddit"):
@@ -2353,6 +2484,13 @@ def interview_agents_batch():
                     "success": False,
                     "error": f"El platform del ítem {i+1} de la lista de entrevistas solo puede ser 'twitter' o 'reddit'"
                 }), 400
+            sanitized = {
+                "agent_id": agent_id,
+                "prompt": prompt
+            }
+            if item_platform:
+                sanitized["platform"] = item_platform
+            sanitized_interviews.append(sanitized)
 
         # Verificar el estado del entorno
         if not SimulationRunner.check_env_alive(simulation_id):
@@ -2363,7 +2501,7 @@ def interview_agents_batch():
 
         # Optimizar el prompt de cada ítem de entrevista, agregar prefijo para evitar que el Agent llame a herramientas
         optimized_interviews = []
-        for interview in interviews:
+        for interview in sanitized_interviews:
             optimized_interview = interview.copy()
             optimized_interview['prompt'] = optimize_interview_prompt(interview.get('prompt', ''))
             optimized_interviews.append(optimized_interview)
@@ -2688,7 +2826,13 @@ def close_simulation_env():
         manager = SimulationManager()
         state = manager.get_simulation(simulation_id)
         if state:
-            state.status = SimulationStatus.COMPLETED
+            if result.get("success", False):
+                state.status = SimulationStatus.COMPLETED
+                state.error = None
+                state.twitter_status = "completed"
+                state.reddit_status = "completed"
+            else:
+                state.error = result.get("error") or "No se pudo cerrar el entorno de simulación"
             manager._save_simulation_state(state)
         
         return jsonify({

@@ -72,7 +72,7 @@ import { useRoute, useRouter } from 'vue-router'
 import GraphPanel from '../components/GraphPanel.vue'
 import Step3Simulation from '../components/Step3Simulation.vue'
 import { getProject, getGraphData } from '../api/graph'
-import { getSimulation, getSimulationConfig, stopSimulation, closeSimulationEnv, getEnvStatus } from '../api/simulation'
+import { getSimulation, getSimulationConfig } from '../api/simulation'
 
 const route = useRoute()
 const router = useRouter()
@@ -94,7 +94,7 @@ const projectData = ref(null)
 const graphData = ref(null)
 const graphLoading = ref(false)
 const systemLogs = ref([])
-const currentStatus = ref('processing') // processing | completed | error
+const currentStatus = ref('ready') // ready | processing | completed | error
 
 // --- Computed Layout Styles ---
 const leftPanelStyle = computed(() => {
@@ -117,6 +117,7 @@ const statusClass = computed(() => {
 const statusText = computed(() => {
   if (currentStatus.value === 'error') return 'Error'
   if (currentStatus.value === 'completed') return 'Completed'
+  if (currentStatus.value === 'ready') return 'Ready'
   return 'Running'
 })
 
@@ -145,50 +146,8 @@ const toggleMaximize = (target) => {
 }
 
 const handleGoBack = async () => {
-  // Cerrar la simulación en ejecución antes de regresar al Paso 2
-  addLog('Preparando regreso al Paso 2, cerrando simulación...')
-  
-  // Detener sondeo
+  addLog('Volviendo al Paso 2 sin detener la simulación')
   stopGraphRefresh()
-  
-  try {
-    // Primero intentar cerrar el entorno de simulación de forma controlada
-    const envStatusRes = await getEnvStatus({ simulation_id: currentSimulationId.value })
-    
-    if (envStatusRes.success && envStatusRes.data?.env_alive) {
-      addLog('Cerrando entorno de simulación...')
-      try {
-        await closeSimulationEnv({ 
-          simulation_id: currentSimulationId.value,
-          timeout: 10
-        })
-        addLog('✓ Entorno de simulación cerrado')
-      } catch (closeErr) {
-        addLog(`Error al cerrar entorno, intentando detención forzada...`)
-        try {
-          await stopSimulation({ simulation_id: currentSimulationId.value })
-          addLog('✓ Simulación detenida forzosamente')
-        } catch (stopErr) {
-          addLog(`Error en detención forzada: ${stopErr.message}`)
-        }
-      }
-    } else {
-      // Entorno no activo, verificar si es necesario detener el proceso
-      if (isSimulating.value) {
-        addLog('Deteniendo proceso de simulación...')
-        try {
-          await stopSimulation({ simulation_id: currentSimulationId.value })
-          addLog('✓ Simulación detenida')
-        } catch (err) {
-          addLog(`Error al detener simulación: ${err.message}`)
-        }
-      }
-    }
-  } catch (err) {
-    addLog(`Error al verificar estado de simulación: ${err.message}`)
-  }
-  
-  // Volver al Paso 2 (Configuración del entorno)
   router.push({ name: 'Simulation', params: { simulationId: currentSimulationId.value } })
 }
 
@@ -273,8 +232,7 @@ let graphRefreshTimer = null
 
 const startGraphRefresh = () => {
   if (graphRefreshTimer) return
-  addLog('Iniciando actualización en tiempo real del grafo (30s)')
-  // Refrescar inmediatamente una vez, luego cada 30 segundos
+  addLog('Actualización automática del grafo activada')
   graphRefreshTimer = setInterval(refreshGraph, 30000)
 }
 
@@ -286,13 +244,13 @@ const stopGraphRefresh = () => {
   }
 }
 
-watch(isSimulating, (newValue) => {
-  if (newValue) {
+watch([isSimulating, viewMode], ([simulating, mode]) => {
+  if (simulating && mode === 'graph') {
     startGraphRefresh()
   } else {
     stopGraphRefresh()
   }
-}, { immediate: true })
+})
 
 onMounted(() => {
   addLog('SimulationRunView inicializado')
@@ -444,4 +402,3 @@ onUnmounted(() => {
   border-right: 1px solid #EAEAEA;
 }
 </style>
-

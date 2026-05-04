@@ -88,6 +88,18 @@ class PlatformActionLogger:
         
         with open(self.log_path, 'a', encoding='utf-8') as f:
             f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+
+    def log_event(self, event_type: str, **payload: Any):
+        """Registrar un evento operacional de la plataforma."""
+        entry = {
+            "timestamp": datetime.now().isoformat(),
+            "event_type": event_type,
+            "platform": self.platform,
+        }
+        entry.update(payload)
+
+        with open(self.log_path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + '\n')
     
     def log_simulation_start(self, config: Dict[str, Any]):
         """Registrar inicio de simulación"""

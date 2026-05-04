@@ -91,6 +91,24 @@
       </div>
 
       <div class="action-controls">
+        <button
+          v-if="phase === 0"
+          class="action-btn primary"
+          :disabled="isStarting"
+          @click="doStartSimulation"
+        >
+          <span v-if="isStarting" class="loading-spinner-small"></span>
+          {{ isStarting ? 'Iniciando...' : 'Iniciar corrida' }}
+        </button>
+        <button
+          v-if="phase === 1"
+          class="action-btn danger"
+          :disabled="isStopping"
+          @click="handleStopSimulation"
+        >
+          <span v-if="isStopping" class="loading-spinner-small"></span>
+          {{ isStopping ? 'Deteniendo...' : 'Detener' }}
+        </button>
         <button 
           class="action-btn primary"
           :disabled="phase !== 2 || isGeneratingReport"
@@ -376,6 +394,88 @@ const resetAllState = () => {
   stopPolling()  // Detener cualquier sondeo previo existente
 }
 
+const isRunActive = (data) => {
+  return data?.runner_status === 'running' || data?.runner_status === 'starting'
+}
+
+const isRunFailed = (data) => {
+  return data?.runner_status === 'failed'
+}
+
+const hasRunOutput = (data) => {
+  return Boolean(
+    data &&
+    (
+      data.current_round > 0 ||
+      data.total_actions_count > 0 ||
+      data.twitter_actions_count > 0 ||
+      data.reddit_actions_count > 0
+    )
+  )
+}
+
+const compactRunError = (error) => {
+  if (!error) return 'Error no especificado'
+  const firstLine = String(error).split('\n').find(Boolean) || String(error)
+  return firstLine.length > 220 ? `${firstLine.slice(0, 220)}...` : firstLine
+}
+
+const loadExistingRun = async () => {
+  if (!props.simulationId) return
+
+  try {
+    const res = await getRunStatus(props.simulationId)
+    if (!res.success || !res.data) {
+      phase.value = 0
+      emit('update-status', 'ready')
+      return
+    }
+
+    const data = res.data
+    runStatus.value = data
+    prevTwitterRound.value = data.twitter_current_round || 0
+    prevRedditRound.value = data.reddit_current_round || 0
+
+    if (isRunActive(data)) {
+      phase.value = 1
+      emit('update-status', 'processing')
+      addLog(`Corrida en progreso reanudada: R${data.current_round || 0}/${data.total_rounds || '-'}`)
+      startStatusPolling()
+      startDetailPolling()
+      return
+    }
+
+    if (isRunFailed(data)) {
+      phase.value = hasRunOutput(data) ? 2 : 0
+      emit('update-status', 'error')
+      addLog(`✗ Corrida fallida cargada: R${data.current_round || 0}/${data.total_rounds || '-'}`)
+      if (data.error) {
+        addLog(`Motivo: ${compactRunError(data.error)}`)
+      }
+      if (hasRunOutput(data)) {
+        await fetchRunStatusDetail()
+      }
+      return
+    }
+
+    if (data.runner_status === 'completed' || hasRunOutput(data)) {
+      phase.value = 2
+      emit('update-status', 'completed')
+      addLog(`Corrida existente cargada: ${data.runner_status || 'con resultados parciales'}`)
+      await fetchRunStatusDetail()
+      return
+    }
+
+    phase.value = 0
+    emit('update-status', 'ready')
+    addLog('Sin corrida activa. Puedes iniciar cuando el entorno esté listo.')
+  } catch (err) {
+    phase.value = 0
+    emit('update-status', 'ready')
+    addLog(`No se pudo cargar estado previo: ${err.message}`)
+  }
+}
+
 // Iniciar simulación
 const doStartSimulation = async () => {
   if (!props.simulationId) {
@@ -395,8 +495,8 @@ const doStartSimulation = async () => {
     const params = {
       simulation_id: props.simulationId,
       platform: 'parallel',
-      force: true,  // Forzar reinicio
-      enable_graph_memory_update: true  // Activar actualización dinámica del grafo
+      force: true,
+      enable_graph_memory_update: false
     }
     
     if (props.maxRounds) {
@@ -404,7 +504,7 @@ const doStartSimulation = async () => {
       addLog(`Configurando máximo de rondas de simulación: ${props.maxRounds}`)
     }
     
-    addLog('Modo de actualización dinámica del grafo activado')
+    addLog('Actualización dinámica del grafo desactivada para proteger corridas largas')
     
     const res = await startSimulation(params)
     
@@ -445,15 +545,25 @@ const handleStopSimulation = async () => {
     const res = await stopSimulation({ simulation_id: props.simulationId })
     
     if (res.success) {
-      addLog('✓ Simulación detenida')
+      const stoppedStatus = res.data?.runner_status
+      if (stoppedStatus === 'failed') {
+        addLog('La simulación ya estaba fallida; no había proceso activo que detener')
+        emit('update-status', 'error')
+      } else if (stoppedStatus === 'completed') {
+        addLog('La simulación ya estaba completada')
+        emit('update-status', 'completed')
+      } else {
+        addLog('✓ Simulación detenida')
+        emit('update-status', 'completed')
+      }
       phase.value = 2
       stopPolling()
-      emit('update-status', 'completed')
     } else {
       addLog(`Error al detener: ${res.error || 'Error desconocido'}`)
     }
   } catch (err) {
-    addLog(`Excepción al detener: ${err.message}`)
+    const apiError = err?.response?.data?.error || err.message
+    addLog(`Excepción al detener: ${apiError}`)
   } finally {
     isStopping.value = false
   }
@@ -464,10 +574,12 @@ let statusTimer = null
 let detailTimer = null
 
 const startStatusPolling = () => {
+  if (statusTimer) return
   statusTimer = setInterval(fetchRunStatus, 2000)
 }
 
 const startDetailPolling = () => {
+  if (detailTimer) return
   detailTimer = setInterval(fetchRunStatusDetail, 3000)
 }
 
@@ -510,12 +622,21 @@ const fetchRunStatus = async () => {
       
       // Detectar si la simulación ha completado (por runner_status o estado de plataforma)
       const isCompleted = data.runner_status === 'completed' || data.runner_status === 'stopped'
+      const isFailed = data.runner_status === 'failed'
       
       // Verificación extra: si el backend aún no actualizó runner_status pero la plataforma ya reportó completado
       // Determinar por estado de twitter_completed y reddit_completed
       const platformsCompleted = checkPlatformsCompleted(data)
       
-      if (isCompleted || platformsCompleted) {
+      if (isFailed) {
+        addLog(`✗ Simulación fallida en R${data.current_round || 0}/${data.total_rounds || '-'}`)
+        if (data.error) {
+          addLog(`Motivo: ${compactRunError(data.error)}`)
+        }
+        phase.value = hasRunOutput(data) ? 2 : 0
+        stopPolling()
+        emit('update-status', 'error')
+      } else if (isCompleted || platformsCompleted) {
         if (platformsCompleted && !isCompleted) {
           addLog('✓ Simulación de todas las plataformas finalizada detectada')
         }
@@ -686,9 +807,7 @@ watch(() => props.systemLogs?.length, () => {
 
 onMounted(() => {
   addLog('Step3 Ejecución de simulación inicializada')
-  if (props.simulationId) {
-    doStartSimulation()
-  }
+  loadExistingRun()
 })
 
 onUnmounted(() => {
@@ -891,6 +1010,15 @@ onUnmounted(() => {
 
 .action-btn.primary:hover:not(:disabled) {
   background: #333;
+}
+
+.action-btn.danger {
+  background: #B42318;
+  color: #FFF;
+}
+
+.action-btn.danger:hover:not(:disabled) {
+  background: #912018;
 }
 
 .action-btn:disabled {

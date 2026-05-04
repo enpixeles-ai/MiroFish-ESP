@@ -159,10 +159,10 @@ class OasisProfileGenerator:
         "ISTP", "ISFP", "ESTP", "ESFP"
     ]
     
-    # Lista de países comunes
+    # Países por defecto para escenarios latinos/hispanos en USA o LatAm
     COUNTRIES = [
-        "China", "US", "UK", "Japan", "Germany", "France", 
-        "Canada", "Australia", "Brazil", "India", "South Korea"
+        "Estados Unidos", "México", "Colombia", "Venezuela", "República Dominicana",
+        "Puerto Rico", "Cuba", "Perú", "Ecuador", "Argentina", "Chile"
     ]
     
     # Entidades de tipo individual (necesitan generar un personaje concreto)
@@ -670,7 +670,7 @@ class OasisProfileGenerator:
     
     def _get_system_prompt(self, is_individual: bool) -> str:
         """Obtener el prompt del sistema"""
-        base_prompt = "Responde siempre en español latino. No uses inglés en ningún caso. Eres un experto en generación de perfiles de usuarios de redes sociales. Genera perfiles detallados y realistas para simulaciones de opinión pública, reproduciendo al máximo la situación real existente. Debes retornar formato JSON válido; los valores de cadena no pueden contener saltos de línea sin escapar."
+        base_prompt = "Responde contenido descriptivo en español latino. Devuelve JSON válido. Conserva claves JSON y valores enum exactamente como se solicitan, por ejemplo gender debe ser male/female/other. Genera perfiles detallados y realistas para simulaciones de opinión pública, reproduciendo al máximo la situación real existente; los valores de cadena no pueden contener saltos de línea sin escapar."
         return base_prompt
     
     def _build_individual_persona_prompt(
@@ -710,7 +710,7 @@ Genera JSON con los siguientes campos:
 3. age: Número de edad (debe ser entero)
 4. gender: Género, debe ser en inglés: "male" o "female"
 5. mbti: Tipo MBTI (ej. INTJ, ENFP, etc.)
-6. country: País (en español, ej. "China")
+6. country: País o región relevante al escenario (ej. "Estados Unidos", "México", "Venezuela")
 7. profession: Profesión
 8. interested_topics: Array de temas de interés
 
@@ -759,7 +759,7 @@ Genera JSON con los siguientes campos:
 3. age: Fijar en 30 (edad virtual de la cuenta institucional)
 4. gender: Fijar en "other" (las cuentas institucionales usan other para indicar que no son personales)
 5. mbti: Tipo MBTI, para describir el estilo de la cuenta, ej. ISTJ representa riguroso y conservador
-6. country: País (en español, ej. "China")
+6. country: País o región relevante al escenario (ej. "Estados Unidos", "México", "Venezuela")
 7. profession: Descripción de la función institucional
 8. interested_topics: Array de áreas de interés
 
@@ -813,7 +813,7 @@ Importante:
                 "age": 30,  # Edad virtual de la institución
                 "gender": "other",  # Las instituciones usan other
                 "mbti": "ISTJ",  # Estilo institucional: riguroso y conservador
-                "country": "China",
+                "country": random.choice(self.COUNTRIES),
                 "profession": "Media",
                 "interested_topics": ["General News", "Current Events", "Public Affairs"],
             }
@@ -825,7 +825,7 @@ Importante:
                 "age": 30,  # Edad virtual de la institución
                 "gender": "other",  # Las instituciones usan other
                 "mbti": "ISTJ",  # Estilo institucional: riguroso y conservador
-                "country": "China",
+                "country": random.choice(self.COUNTRIES),
                 "profession": entity_type,
                 "interested_topics": ["Public Policy", "Community", "Official Announcements"],
             }
@@ -1176,7 +1176,7 @@ Importante:
                 "age": profile.age if profile.age else 30,
                 "gender": self._normalize_gender(profile.gender),
                 "mbti": profile.mbti if profile.mbti else "ISTJ",
-                "country": profile.country if profile.country else "China",
+                "country": profile.country if profile.country else "Estados Unidos",
             }
             
             # Campos opcionales
@@ -1202,4 +1202,3 @@ Importante:
         """[Obsoleto] Usar el método save_profiles()"""
         logger.warning("save_profiles_to_json está obsoleto, usar el método save_profiles")
         self.save_profiles(profiles, file_path, platform)
-

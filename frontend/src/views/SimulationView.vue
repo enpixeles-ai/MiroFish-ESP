@@ -69,7 +69,7 @@ import { useRoute, useRouter } from 'vue-router'
 import GraphPanel from '../components/GraphPanel.vue'
 import Step2EnvSetup from '../components/Step2EnvSetup.vue'
 import { getProject, getGraphData } from '../api/graph'
-import { getSimulation, stopSimulation, getEnvStatus, closeSimulationEnv } from '../api/simulation'
+import { getSimulation } from '../api/simulation'
 
 const route = useRoute()
 const router = useRouter()
@@ -88,7 +88,7 @@ const projectData = ref(null)
 const graphData = ref(null)
 const graphLoading = ref(false)
 const systemLogs = ref([])
-const currentStatus = ref('processing') // processing | completed | error
+const currentStatus = ref('ready') // ready | processing | completed | error
 
 // --- Computed Layout Styles ---
 const leftPanelStyle = computed(() => {
@@ -111,6 +111,7 @@ const statusClass = computed(() => {
 const statusText = computed(() => {
   if (currentStatus.value === 'error') return 'Error'
   if (currentStatus.value === 'completed') return 'Ready'
+  if (currentStatus.value === 'ready') return 'Ready'
   return 'Preparing'
 })
 
@@ -172,69 +173,6 @@ const handleNextStep = (params = {}) => {
 
 // --- Data Logic ---
 
-/**
- * Verificar y cerrar la simulación en ejecución
- * Cuando el usuario regresa del Paso 3 al Paso 2, se asume que quiere salir de la simulación
- */
-const checkAndStopRunningSimulation = async () => {
-  if (!currentSimulationId.value) return
-  
-  try {
-    // Primero verificar si el entorno de simulación está activo
-    const envStatusRes = await getEnvStatus({ simulation_id: currentSimulationId.value })
-    
-    if (envStatusRes.success && envStatusRes.data?.env_alive) {
-      addLog('Entorno de simulación activo detectado, cerrando...')
-      
-      // Intentar cerrar el entorno de simulación de forma controlada
-      try {
-        const closeRes = await closeSimulationEnv({ 
-          simulation_id: currentSimulationId.value,
-          timeout: 10  // timeout de 10 segundos
-        })
-        
-        if (closeRes.success) {
-          addLog('✓ Entorno de simulación cerrado')
-        } else {
-          addLog(`Error al cerrar entorno de simulación: ${closeRes.error || 'Error desconocido'}`)
-          // Si el cierre controlado falla, intentar detención forzada
-          await forceStopSimulation()
-        }
-      } catch (closeErr) {
-        addLog(`Excepción al cerrar entorno de simulación: ${closeErr.message}`)
-        // Si el cierre controlado genera excepción, intentar detención forzada
-        await forceStopSimulation()
-      }
-    } else {
-      // Entorno no activo, pero puede que el proceso siga, verificar estado de simulación
-      const simRes = await getSimulation(currentSimulationId.value)
-      if (simRes.success && simRes.data?.status === 'running') {
-        addLog('Estado de simulación activo detectado, deteniendo...')
-        await forceStopSimulation()
-      }
-    }
-  } catch (err) {
-    // El fallo al verificar el estado del entorno no afecta el flujo posterior
-    console.warn('Error al verificar estado de simulación:', err)
-  }
-}
-
-/**
- * Detener la simulación de forma forzada
- */
-const forceStopSimulation = async () => {
-  try {
-    const stopRes = await stopSimulation({ simulation_id: currentSimulationId.value })
-    if (stopRes.success) {
-      addLog('✓ Simulación detenida forzosamente')
-    } else {
-      addLog(`Error en detención forzada de simulación: ${stopRes.error || 'Error desconocido'}`)
-    }
-  } catch (err) {
-    addLog(`Excepción en detención forzada de simulación: ${err.message}`)
-  }
-}
-
 const loadSimulationData = async () => {
   try {
     addLog(`Cargando datos de simulación: ${currentSimulationId.value}`)
@@ -288,11 +226,6 @@ const refreshGraph = () => {
 
 onMounted(async () => {
   addLog('SimulationView inicializado')
-  
-  // Verificar y cerrar la simulación en ejecución (cuando el usuario regresa del Paso 3)
-  await checkAndStopRunningSimulation()
-  
-  // Cargar datos de simulación
   loadSimulationData()
 })
 </script>
@@ -431,4 +364,3 @@ onMounted(async () => {
   border-right: 1px solid #EAEAEA;
 }
 </style>
-

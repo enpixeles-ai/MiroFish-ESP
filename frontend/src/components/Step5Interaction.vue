@@ -378,7 +378,7 @@
             <div class="results-header">
               <span class="results-title">Resultados de la encuesta</span>
               <div class="results-header-right">
-                <span class="results-count">{{ surveyResults.length }} respuestas</span>
+                <span class="results-count">{{ answeredSurveyCount }} / {{ surveyResults.length }} respuestas</span>
                 <button class="download-survey-btn" @click="downloadSurveyResults" title="Descargar resultados como TXT">
                   <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
@@ -454,6 +454,8 @@ const selectedAgents = ref(new Set())
 const surveyQuestion = ref('')
 const surveyResults = ref([])
 const isSurveying = ref(false)
+const SURVEY_BATCH_SIZE = 5
+const INTERVIEW_PLATFORM = 'reddit'
 
 // Report Data
 const reportOutline = ref(null)
@@ -461,6 +463,7 @@ const generatedSections = ref({})
 const collapsedSections = ref(new Set())
 const currentSectionIndex = ref(null)
 const profiles = ref([])
+const answeredSurveyCount = computed(() => surveyResults.value.filter(result => result.answered).length)
 
 // Helper Methods
 const isSectionCompleted = (sectionIndex) => {
@@ -736,6 +739,8 @@ const sendToAgent = async (message) => {
   
   const res = await interviewAgents({
     simulation_id: props.simulationId,
+    platform: INTERVIEW_PLATFORM,
+    timeout: 180,
     interviews: [{
       agent_id: selectedAgentIndex.value,
       prompt: prompt
@@ -788,6 +793,42 @@ const scrollToBottom = () => {
   })
 }
 
+const extractAgentResponse = (resultsData, agentId) => {
+  if (!resultsData) return { answer: null, error: 'Sin datos de respuesta' }
+
+  if (typeof resultsData === 'object' && !Array.isArray(resultsData)) {
+    const redditKey = `reddit_${agentId}`
+    const twitterKey = `twitter_${agentId}`
+    const agentResult = resultsData[redditKey] || resultsData[twitterKey] || resultsData[String(agentId)]
+    if (!agentResult) return { answer: null, error: 'El agente no respondió' }
+    return {
+      answer: agentResult.response || agentResult.answer || null,
+      error: agentResult.error || null,
+      platform: agentResult.platform
+    }
+  }
+
+  if (Array.isArray(resultsData)) {
+    const agentResult = resultsData.find(r => Number(r.agent_id) === Number(agentId))
+    if (!agentResult) return { answer: null, error: 'El agente no respondió' }
+    return {
+      answer: agentResult.response || agentResult.answer || null,
+      error: agentResult.error || null,
+      platform: agentResult.platform
+    }
+  }
+
+  return { answer: null, error: 'Formato de respuesta no reconocido' }
+}
+
+const chunkArray = (items, size) => {
+  const chunks = []
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size))
+  }
+  return chunks
+}
+
 // Survey Methods
 const toggleAgentSelection = (idx) => {
   const newSet = new Set(selectedAgents.value)
@@ -820,57 +861,48 @@ const submitSurvey = async () => {
       agent_id: idx,
       prompt: surveyQuestion.value.trim()
     }))
-    
-    const res = await interviewAgents({
-      simulation_id: props.simulationId,
-      interviews: interviews
-    })
-    
-    if (res.success && res.data) {
-      // Ruta correcta de datos: res.data.result.results es un diccionario de objetos
-      // Formato: {"twitter_0": {...}, "reddit_0": {...}, "twitter_1": {...}, ...}
+
+    const surveyResultsList = []
+    const batches = chunkArray(interviews, SURVEY_BATCH_SIZE)
+
+    for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+      const batch = batches[batchIndex]
+      addLog(`Procesando lote ${batchIndex + 1}/${batches.length} (${batch.length} destinatarios)`)
+
+      const res = await interviewAgents({
+        simulation_id: props.simulationId,
+        platform: INTERVIEW_PLATFORM,
+        timeout: Math.max(180, batch.length * 45),
+        interviews: batch
+      })
+
+      if (!res.success || !res.data) {
+        throw new Error(res.error || 'Solicitud fallida')
+      }
+
       const resultData = res.data.result || res.data
       const resultsDict = resultData.results || resultData
-      
-      // Convertir diccionario de objetos a formato de array
-      const surveyResultsList = []
-      
-      for (const interview of interviews) {
+
+      for (const interview of batch) {
         const agentIdx = interview.agent_id
         const agent = profiles.value[agentIdx]
-        
-        // Priorizar respuesta de reddit, luego twitter
-        let responseContent = 'Sin respuesta'
-        
-        if (typeof resultsDict === 'object' && !Array.isArray(resultsDict)) {
-          const redditKey = `reddit_${agentIdx}`
-          const twitterKey = `twitter_${agentIdx}`
-          const agentResult = resultsDict[redditKey] || resultsDict[twitterKey]
-          if (agentResult) {
-            responseContent = agentResult.response || agentResult.answer || 'Sin respuesta'
-          }
-        } else if (Array.isArray(resultsDict)) {
-          // Compatible con formato de array
-          const matchedResult = resultsDict.find(r => r.agent_id === agentIdx)
-          if (matchedResult) {
-            responseContent = matchedResult.response || matchedResult.answer || 'Sin respuesta'
-          }
-        }
-        
+        const extracted = extractAgentResponse(resultsDict, agentIdx)
+
         surveyResultsList.push({
           agent_id: agentIdx,
           agent_name: agent?.username || `Agent ${agentIdx}`,
           profession: agent?.profession,
           question: surveyQuestion.value.trim(),
-          answer: responseContent
+          answer: extracted.answer || `Sin respuesta${extracted.error ? `: ${extracted.error}` : ''}`,
+          platform: extracted.platform || INTERVIEW_PLATFORM,
+          answered: Boolean(extracted.answer)
         })
       }
-      
-      surveyResults.value = surveyResultsList
-      addLog(`Recibidas ${surveyResults.value.length} respuestas`)
-    } else {
-      throw new Error(res.error || 'Solicitud fallida')
     }
+
+    surveyResults.value = surveyResultsList
+    const answeredCount = surveyResults.value.filter(result => result.answered).length
+    addLog(`Recibidas ${answeredCount}/${surveyResults.value.length} respuestas reales`)
   } catch (err) {
     addLog(`Error al enviar encuesta: ${err.message}`)
   } finally {
@@ -905,6 +937,9 @@ const downloadSurveyResults = () => {
     txt += `Agente:      ${result.agent_name || `Agent ${result.agent_id}`}\n`
     if (result.profession) {
       txt += `Descripción: ${result.profession}\n`
+    }
+    if (result.platform) {
+      txt += `Plataforma:   ${result.platform}\n`
     }
     txt += `\n${result.answer || 'Sin respuesta'}\n\n`
   })

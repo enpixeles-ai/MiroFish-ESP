@@ -21,8 +21,18 @@ class Config:
     """Clase de configuración de Flask"""
     
     # Configuración de Flask
-    SECRET_KEY = os.environ.get('SECRET_KEY', 'mirofish-secret-key')
-    DEBUG = os.environ.get('FLASK_DEBUG', 'True').lower() == 'true'
+    DEBUG = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
+    SECRET_KEY = os.environ.get('SECRET_KEY')
+    if DEBUG and not SECRET_KEY:
+        SECRET_KEY = 'mirofish-dev-secret-key'
+    CORS_ORIGINS = [
+        origin.strip()
+        for origin in os.environ.get(
+            'CORS_ORIGINS',
+            'http://localhost:3000,http://127.0.0.1:3000'
+        ).split(',')
+        if origin.strip()
+    ]
     
     # Configuración JSON - deshabilitar escape ASCII para mostrar Unicode directamente
     JSON_AS_ASCII = False
@@ -67,9 +77,10 @@ class Config:
     def validate(cls):
         """Validar configuración necesaria"""
         errors = []
+        if not cls.SECRET_KEY:
+            errors.append("SECRET_KEY no configurado")
         if not cls.LLM_API_KEY:
             errors.append("LLM_API_KEY no configurado")
         if not cls.ZEP_API_KEY:
             errors.append("ZEP_API_KEY no configurado")
         return errors
-

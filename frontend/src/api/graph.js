@@ -53,7 +53,8 @@ export function getTaskStatus(taskId) {
 export function getGraphData(graphId) {
   return service({
     url: `/api/graph/data/${graphId}`,
-    method: 'get'
+    method: 'get',
+    timeout: 45000
   })
 }
 

@@ -4,12 +4,62 @@ Interfaz 1: Analiza el contenido del texto y genera definiciones de tipos de ent
 """
 
 import json
+import re
+import unicodedata
 from typing import Dict, Any, List, Optional
 from ..utils.llm_client import LLMClient
+from ..utils.logger import get_logger
+
+
+logger = get_logger('mirofish.ontology')
+
+
+RESERVED_ATTRIBUTE_NAMES = {"name", "uuid", "group_id", "created_at", "summary"}
+
+
+def _ascii_text(value: Any) -> str:
+    text = str(value or "").strip()
+    return unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+
+
+def _split_identifier_words(value: Any) -> List[str]:
+    text = _ascii_text(value)
+    text = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", text)
+    return [part for part in re.split(r"[^a-zA-Z0-9]+", text) if part]
+
+
+def _to_pascal_case(value: Any, fallback: str = "UnknownEntity") -> str:
+    words = _split_identifier_words(value)
+    result = "".join(word[:1].upper() + word[1:].lower() for word in words)
+    return result or fallback
+
+
+def _to_screaming_snake_case(value: Any, fallback: str = "RELATED_TO") -> str:
+    words = _split_identifier_words(value)
+    result = "_".join(word.upper() for word in words)
+    if result == "COLLABORABLES_WITH":
+        return "COLLABORATES_WITH"
+    return result or fallback
+
+
+def _to_snake_case(value: Any, fallback: str = "attribute_text") -> str:
+    words = _split_identifier_words(value)
+    result = "_".join(word.lower() for word in words)
+    if not result or result in RESERVED_ATTRIBUTE_NAMES:
+        return fallback
+    return result
+
+
+def _escape_docstring(value: Any) -> str:
+    return str(value or "").replace('"""', '\\"\\"\\"').replace("\n", " ")
 
 
 # Prompt de sistema para la generación de ontología
-ONTOLOGY_SYSTEM_PROMPT = """Responde siempre en español latino. No uses inglés en ningún caso.
+ONTOLOGY_SYSTEM_PROMPT = """Responde en español latino para analysis_summary, descriptions, explanations y examples.
+Mantén SIEMPRE en inglés técnico los campos name de entity_types, edge_types y attributes:
+- entity_types[].name: English PascalCase, por ejemplo ImmigrationLawyer, CommunityOrganizer.
+- edge_types[].name: English UPPER_SNAKE_CASE, por ejemplo WORKS_FOR, INFLUENCES.
+- attributes[].name: English snake_case, por ejemplo full_name, influence_level.
 
 Eres un experto profesional en diseño de ontologías para grafos de conocimiento. Tu tarea es analizar el contenido del texto y los requisitos de simulación para diseñar tipos de entidades y tipos de relaciones adecuados para la **simulación de opinión pública en redes sociales**.
 
@@ -152,7 +202,7 @@ B. **Tipos concretos (8, diseñados según el contenido del texto)**:
 - RESPONDS_TO: Responde a
 - SUPPORTS: Apoya
 - OPPOSES: Se opone
-- COLLABORABLES_WITH: Colabora con
+- COLLABORATES_WITH: Colabora con
 - COMPETES_WITH: Compite con
 """
 
@@ -196,16 +246,184 @@ class OntologyGenerator:
         ]
         
         # Llamar al LLM
-        result = self.llm_client.chat_json(
-            messages=messages,
-            temperature=0.3,
-            max_tokens=4096
-        )
+        try:
+            result = self.llm_client.chat_json(
+                messages=messages,
+                temperature=0.2,
+                max_tokens=8192
+            )
+        except Exception as exc:
+            logger.error(
+                "No se pudo generar ontología válida con LLM; usando ontología segura por defecto. "
+                f"Error: {type(exc).__name__}: {exc}"
+            )
+            result = self._build_fallback_ontology(simulation_requirement)
         
         # Validación y post-procesamiento
         result = self._validate_and_process(result)
         
         return result
+
+    def _build_fallback_ontology(self, simulation_requirement: str) -> Dict[str, Any]:
+        """Ontología conservadora para que crear proyecto no falle por salida LLM truncada."""
+        summary = (simulation_requirement or "").strip().replace("\n", " ")
+        if len(summary) > 240:
+            summary = summary[:237] + "..."
+        if not summary:
+            summary = "Ontología base generada automáticamente porque el LLM no devolvió JSON válido."
+
+        entity_types = [
+            {
+                "name": "BusinessOwner",
+                "description": "Owner or decision maker in a business context.",
+                "attributes": [
+                    {"name": "full_name", "type": "text", "description": "Full name"},
+                    {"name": "business_role", "type": "text", "description": "Business role"},
+                ],
+                "examples": ["Founder", "Manager"],
+            },
+            {
+                "name": "Customer",
+                "description": "Customer, lead, or affected end user.",
+                "attributes": [
+                    {"name": "full_name", "type": "text", "description": "Full name"},
+                    {"name": "customer_need", "type": "text", "description": "Primary need"},
+                ],
+                "examples": ["Lead", "Client"],
+            },
+            {
+                "name": "ServiceProvider",
+                "description": "Provider offering a product or service.",
+                "attributes": [
+                    {"name": "org_name", "type": "text", "description": "Organization name"},
+                    {"name": "service_type", "type": "text", "description": "Service category"},
+                ],
+                "examples": ["Agency", "Consultant"],
+            },
+            {
+                "name": "CommunityGroup",
+                "description": "Community or audience segment.",
+                "attributes": [
+                    {"name": "group_label", "type": "text", "description": "Group label"},
+                    {"name": "shared_interest", "type": "text", "description": "Shared interest"},
+                ],
+                "examples": ["WhatsApp group", "Local community"],
+            },
+            {
+                "name": "Influencer",
+                "description": "Person who shapes audience opinions.",
+                "attributes": [
+                    {"name": "full_name", "type": "text", "description": "Full name"},
+                    {"name": "channel", "type": "text", "description": "Main channel"},
+                ],
+                "examples": ["Creator", "Community leader"],
+            },
+            {
+                "name": "MediaChannel",
+                "description": "Media or social platform channel.",
+                "attributes": [
+                    {"name": "channel_name", "type": "text", "description": "Channel name"},
+                    {"name": "platform_type", "type": "text", "description": "Platform type"},
+                ],
+                "examples": ["Facebook", "TikTok"],
+            },
+            {
+                "name": "Competitor",
+                "description": "Competing organization or alternative option.",
+                "attributes": [
+                    {"name": "org_name", "type": "text", "description": "Organization name"},
+                    {"name": "offer_type", "type": "text", "description": "Competing offer"},
+                ],
+                "examples": ["Competitor brand", "Alternative provider"],
+            },
+            {
+                "name": "PublicInstitution",
+                "description": "Public agency, regulator, or institution.",
+                "attributes": [
+                    {"name": "org_name", "type": "text", "description": "Institution name"},
+                    {"name": "jurisdiction", "type": "text", "description": "Jurisdiction"},
+                ],
+                "examples": ["Government agency", "Regulator"],
+            },
+            {
+                "name": "Person",
+                "description": "Any individual person not covered by specific types.",
+                "attributes": [
+                    {"name": "full_name", "type": "text", "description": "Full name"},
+                    {"name": "role", "type": "text", "description": "Role or occupation"},
+                ],
+                "examples": ["Citizen", "User"],
+            },
+            {
+                "name": "Organization",
+                "description": "Any organization not covered by specific types.",
+                "attributes": [
+                    {"name": "org_name", "type": "text", "description": "Organization name"},
+                    {"name": "org_type", "type": "text", "description": "Organization type"},
+                ],
+                "examples": ["Company", "Association"],
+            },
+        ]
+
+        edge_types = [
+            {
+                "name": "INFLUENCES",
+                "description": "Shapes opinions or decisions.",
+                "source_targets": [{"source": "Influencer", "target": "Customer"}],
+                "attributes": [],
+            },
+            {
+                "name": "SERVES",
+                "description": "Provides service to a customer or group.",
+                "source_targets": [{"source": "ServiceProvider", "target": "Customer"}],
+                "attributes": [],
+            },
+            {
+                "name": "COMPETES_WITH",
+                "description": "Competes for attention, trust, or conversion.",
+                "source_targets": [{"source": "ServiceProvider", "target": "Competitor"}],
+                "attributes": [],
+            },
+            {
+                "name": "COMMUNICATES_THROUGH",
+                "description": "Uses a channel to communicate.",
+                "source_targets": [{"source": "Person", "target": "MediaChannel"}],
+                "attributes": [],
+            },
+            {
+                "name": "BELONGS_TO",
+                "description": "Belongs to a community or organization.",
+                "source_targets": [{"source": "Person", "target": "CommunityGroup"}],
+                "attributes": [],
+            },
+            {
+                "name": "REGULATES",
+                "description": "Regulates or governs an organization.",
+                "source_targets": [{"source": "PublicInstitution", "target": "Organization"}],
+                "attributes": [],
+            },
+            {
+                "name": "RESPONDS_TO",
+                "description": "Responds to another actor or message.",
+                "source_targets": [{"source": "Customer", "target": "ServiceProvider"}],
+                "attributes": [],
+            },
+            {
+                "name": "COLLABORATES_WITH",
+                "description": "Collaborates with another actor.",
+                "source_targets": [{"source": "Organization", "target": "Organization"}],
+                "attributes": [],
+            },
+        ]
+
+        return {
+            "entity_types": entity_types,
+            "edge_types": edge_types,
+            "analysis_summary": (
+                "Se usó una ontología base segura porque la respuesta JSON del LLM fue inválida. "
+                f"Resumen del requisito: {summary}"
+            ),
+        }
     
     # Longitud máxima del texto enviado al LLM (50 000 caracteres)
     MAX_TEXT_LENGTH_FOR_LLM = 50000
@@ -267,28 +485,86 @@ Basándote en el contenido anterior, diseña los tipos de entidades y tipos de r
         if "analysis_summary" not in result:
             result["analysis_summary"] = ""
         
+        entity_name_map = {}
+
         # Validar tipos de entidad
         for entity in result["entity_types"]:
+            original_name = entity.get("name", "")
+            entity["name"] = _to_pascal_case(original_name)
+            entity_name_map[original_name] = entity["name"]
+            if entity["name"] != original_name:
+                logger.warning(f"Nombre de entidad normalizado: {original_name!r} -> {entity['name']!r}")
+
             if "attributes" not in entity:
                 entity["attributes"] = []
             if "examples" not in entity:
                 entity["examples"] = []
+
+            normalized_attributes = []
+            for index, attr in enumerate(entity.get("attributes", []), start=1):
+                original_attr_name = attr.get("name", "")
+                fallback_attr_name = f"attribute_{index}_text"
+                attr["name"] = _to_snake_case(original_attr_name, fallback_attr_name)
+                if attr["name"] != original_attr_name:
+                    logger.warning(
+                        f"Atributo normalizado en {entity['name']}: {original_attr_name!r} -> {attr['name']!r}"
+                    )
+                attr["type"] = "text"
+                normalized_attributes.append(attr)
+            entity["attributes"] = normalized_attributes
+
             # Asegurarse de que la descripción no supere los 100 caracteres
             if len(entity.get("description", "")) > 100:
                 entity["description"] = entity["description"][:97] + "..."
         
         # Validar tipos de relación
         for edge in result["edge_types"]:
+            original_edge_name = edge.get("name", "")
+            edge["name"] = _to_screaming_snake_case(original_edge_name)
+            if edge["name"] != original_edge_name:
+                logger.warning(f"Nombre de relación normalizado: {original_edge_name!r} -> {edge['name']!r}")
+
             if "source_targets" not in edge:
                 edge["source_targets"] = []
             if "attributes" not in edge:
                 edge["attributes"] = []
+
+            for source_target in edge.get("source_targets", []):
+                source = source_target.get("source")
+                target = source_target.get("target")
+                if source in entity_name_map:
+                    source_target["source"] = entity_name_map[source]
+                elif source:
+                    source_target["source"] = _to_pascal_case(source)
+                if target in entity_name_map:
+                    source_target["target"] = entity_name_map[target]
+                elif target:
+                    source_target["target"] = _to_pascal_case(target)
+
+            normalized_edge_attributes = []
+            for index, attr in enumerate(edge.get("attributes", []), start=1):
+                attr["name"] = _to_snake_case(attr.get("name", ""), f"edge_attribute_{index}_text")
+                attr["type"] = "text"
+                normalized_edge_attributes.append(attr)
+            edge["attributes"] = normalized_edge_attributes
+
             if len(edge.get("description", "")) > 100:
                 edge["description"] = edge["description"][:97] + "..."
         
         # Límite de la API Zep: máximo 10 tipos de entidad personalizados y máximo 10 tipos de aristas personalizados
         MAX_ENTITY_TYPES = 10
         MAX_EDGE_TYPES = 10
+
+        seen_names = set()
+        deduped_entities = []
+        for entity in result["entity_types"]:
+            name = entity.get("name")
+            if name and name not in seen_names:
+                seen_names.add(name)
+                deduped_entities.append(entity)
+            elif name:
+                logger.warning(f"Tipo de entidad duplicado eliminado: {name}")
+        result["entity_types"] = deduped_entities
         
         # Definición de tipos de reserva
         person_fallback = {
@@ -376,7 +652,7 @@ Basándote en el contenido anterior, diseña los tipos de entidades y tipos de r
             desc = entity.get("description", f"A {name} entity.")
             
             code_lines.append(f'class {name}(EntityModel):')
-            code_lines.append(f'    """{desc}"""')
+            code_lines.append(f'    """{_escape_docstring(desc)}"""')
             
             attrs = entity.get("attributes", [])
             if attrs:
@@ -384,7 +660,7 @@ Basándote en el contenido anterior, diseña los tipos de entidades y tipos de r
                     attr_name = attr["name"]
                     attr_desc = attr.get("description", attr_name)
                     code_lines.append(f'    {attr_name}: EntityText = Field(')
-                    code_lines.append(f'        description="{attr_desc}",')
+                    code_lines.append(f'        description={json.dumps(str(attr_desc), ensure_ascii=False)},')
                     code_lines.append(f'        default=None')
                     code_lines.append(f'    )')
             else:
@@ -404,7 +680,7 @@ Basándote en el contenido anterior, diseña los tipos de entidades y tipos de r
             desc = edge.get("description", f"A {name} relationship.")
             
             code_lines.append(f'class {class_name}(EdgeModel):')
-            code_lines.append(f'    """{desc}"""')
+            code_lines.append(f'    """{_escape_docstring(desc)}"""')
             
             attrs = edge.get("attributes", [])
             if attrs:
@@ -412,7 +688,7 @@ Basándote en el contenido anterior, diseña los tipos de entidades y tipos de r
                     attr_name = attr["name"]
                     attr_desc = attr.get("description", attr_name)
                     code_lines.append(f'    {attr_name}: EntityText = Field(')
-                    code_lines.append(f'        description="{attr_desc}",')
+                    code_lines.append(f'        description={json.dumps(str(attr_desc), ensure_ascii=False)},')
                     code_lines.append(f'        default=None')
                     code_lines.append(f'    )')
             else:
@@ -452,4 +728,3 @@ Basándote en el contenido anterior, diseña los tipos de entidades y tipos de r
         code_lines.append('}')
         
         return '\n'.join(code_lines)
-

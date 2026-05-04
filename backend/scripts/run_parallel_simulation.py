@@ -168,6 +168,9 @@ try:
         generate_twitter_agent_graph,
         generate_reddit_agent_graph
     )
+    from oasis_runtime_limits import configure_camel_runtime_limits
+
+    configure_camel_runtime_limits()
 except ImportError as e:
     print(f"Error: dependencia faltante {e}")
     print("Por favor instala primero: pip install oasis-ai camel-ai")
@@ -1096,6 +1099,148 @@ class PlatformSimulation:
         self.env = None
         self.agent_graph = None
         self.total_actions = 0
+        self.failed = False
+        self.error = None
+
+
+def _env_int(name: str, default: int, minimum: int = 0) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return max(minimum, int(raw))
+    except (TypeError, ValueError):
+        return default
+
+
+def get_oasis_semaphore(platform: str) -> int:
+    default_limit = _env_int("MIROFISH_OASIS_SEMAPHORE", 8, minimum=1)
+    return _env_int(f"MIROFISH_{platform.upper()}_SEMAPHORE", default_limit, minimum=1)
+
+
+def compact_error(exc: Exception, max_chars: int = 900) -> str:
+    error = str(exc) or exc.__class__.__name__
+    error = " ".join(error.split())
+    return error[:max_chars] + ("..." if len(error) > max_chars else "")
+
+
+async def run_env_step_with_retries(
+    env,
+    actions,
+    platform: str,
+    round_num: int,
+    action_logger: Optional[PlatformActionLogger],
+    main_logger: Optional[SimulationLogManager],
+) -> tuple[bool, Optional[str]]:
+    max_attempts = _env_int("MIROFISH_ROUND_STEP_ATTEMPTS", 2, minimum=1)
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            await env.step(actions)
+            return True, None
+        except Exception as exc:
+            error = compact_error(exc)
+            if main_logger:
+                main_logger.warning(
+                    f"[{platform}] Error en ronda {round_num}, intento {attempt}/{max_attempts}: {error}"
+                )
+            if action_logger:
+                action_logger.log_event(
+                    "round_error",
+                    round=round_num,
+                    attempt=attempt,
+                    max_attempts=max_attempts,
+                    error=error,
+                )
+            if attempt < max_attempts:
+                await asyncio.sleep(min(2 * attempt, 8))
+
+    return False, error
+
+
+async def run_platform_safely(
+    platform: str,
+    action_logger: Optional[PlatformActionLogger],
+    main_logger: Optional[SimulationLogManager],
+    coro,
+) -> PlatformSimulation:
+    try:
+        return await coro
+    except Exception as exc:
+        result = PlatformSimulation()
+        result.failed = True
+        result.error = compact_error(exc)
+        if main_logger:
+            main_logger.error(f"[{platform}] Simulación fallida: {result.error}")
+        if action_logger:
+            action_logger.log_event("simulation_error", error=result.error)
+        return result
+
+
+async def run_parallel_platforms(
+    config: Dict[str, Any],
+    simulation_dir: str,
+    twitter_logger: PlatformActionLogger,
+    reddit_logger: PlatformActionLogger,
+    main_logger: SimulationLogManager,
+    max_rounds: Optional[int],
+) -> tuple[Optional[PlatformSimulation], Optional[PlatformSimulation]]:
+    tasks = {
+        asyncio.create_task(
+            run_platform_safely(
+                "Twitter",
+                twitter_logger,
+                main_logger,
+                run_twitter_simulation(config, simulation_dir, twitter_logger, main_logger, max_rounds),
+            )
+        ): "twitter",
+        asyncio.create_task(
+            run_platform_safely(
+                "Reddit",
+                reddit_logger,
+                main_logger,
+                run_reddit_simulation(config, simulation_dir, reddit_logger, main_logger, max_rounds),
+            )
+        ): "reddit",
+    }
+
+    twitter_result: Optional[PlatformSimulation] = None
+    reddit_result: Optional[PlatformSimulation] = None
+    pending = set(tasks.keys())
+
+    while pending:
+        done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+        should_cancel_pending = False
+
+        for task in done:
+            platform = tasks[task]
+            try:
+                result = task.result()
+            except Exception as exc:
+                result = PlatformSimulation()
+                result.failed = True
+                result.error = compact_error(exc)
+                main_logger.error(f"[{platform}] Tarea de plataforma fallida: {result.error}")
+
+            if platform == "twitter":
+                twitter_result = result
+            else:
+                reddit_result = result
+
+            if result and result.failed:
+                should_cancel_pending = True
+
+        if should_cancel_pending and pending:
+            for task in pending:
+                pending_platform = tasks[task]
+                main_logger.warning(
+                    f"[{pending_platform}] Cancelando plataforma pendiente porque otra plataforma falló"
+                )
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            pending.clear()
+
+    return twitter_result, reddit_result
 
 
 async def run_twitter_simulation(
@@ -1152,11 +1297,13 @@ async def run_twitter_simulation(
     if os.path.exists(db_path):
         os.remove(db_path)
 
+    semaphore = get_oasis_semaphore("twitter")
+    log_info(f"Concurrencia OASIS: {semaphore}")
     result.env = oasis.make(
         agent_graph=result.agent_graph,
         platform=oasis.DefaultPlatformType.TWITTER,
         database_path=db_path,
-        semaphore=30,  # Limitar el máximo de solicitudes LLM concurrentes para evitar sobrecarga de la API
+        semaphore=semaphore,
     )
 
     await result.env.reset()
@@ -1224,6 +1371,11 @@ async def run_twitter_simulation(
             log_info(f"Rondas limitadas: {original_rounds} -> {total_rounds} (max_rounds={max_rounds})")
 
     start_time = datetime.now()
+    max_consecutive_failures = _env_int(
+        "MIROFISH_MAX_CONSECUTIVE_ROUND_FAILURES", 3, minimum=1
+    )
+    consecutive_failures = 0
+    platform_error = None
 
     for round_num in range(total_rounds):
         # Verificar si se recibió señal de salida
@@ -1251,7 +1403,22 @@ async def run_twitter_simulation(
             continue
 
         actions = {agent: LLMAction() for _, agent in active_agents}
-        await result.env.step(actions)
+        step_ok, step_error = await run_env_step_with_retries(
+            result.env, actions, "Twitter", round_num + 1, action_logger, main_logger
+        )
+        if not step_ok:
+            consecutive_failures += 1
+            if action_logger:
+                action_logger.log_round_end(round_num + 1, 0)
+            if consecutive_failures >= max_consecutive_failures:
+                platform_error = (
+                    f"Twitter acumuló {consecutive_failures} rondas fallidas consecutivas. "
+                    f"Último error: {step_error}"
+                )
+                break
+            continue
+
+        consecutive_failures = 0
 
         # Obtener las acciones realmente ejecutadas desde la base de datos y registrarlas
         actual_actions, last_rowid = fetch_new_actions_from_db(
@@ -1280,7 +1447,14 @@ async def run_twitter_simulation(
 
     # Nota: no cerrar el entorno, conservarlo para Interview
 
-    if action_logger:
+    if platform_error:
+        result.failed = True
+        result.error = platform_error
+        if main_logger:
+            main_logger.error(f"[Twitter] {platform_error}")
+        if action_logger:
+            action_logger.log_event("simulation_error", error=platform_error, total_actions=total_actions)
+    elif action_logger:
         action_logger.log_simulation_end(total_rounds, total_actions)
 
     result.total_actions = total_actions
@@ -1343,11 +1517,13 @@ async def run_reddit_simulation(
     if os.path.exists(db_path):
         os.remove(db_path)
 
+    semaphore = get_oasis_semaphore("reddit")
+    log_info(f"Concurrencia OASIS: {semaphore}")
     result.env = oasis.make(
         agent_graph=result.agent_graph,
         platform=oasis.DefaultPlatformType.REDDIT,
         database_path=db_path,
-        semaphore=30,  # Limitar el máximo de solicitudes LLM concurrentes para evitar sobrecarga de la API
+        semaphore=semaphore,
     )
 
     await result.env.reset()
@@ -1423,6 +1599,11 @@ async def run_reddit_simulation(
             log_info(f"Rondas limitadas: {original_rounds} -> {total_rounds} (max_rounds={max_rounds})")
 
     start_time = datetime.now()
+    max_consecutive_failures = _env_int(
+        "MIROFISH_MAX_CONSECUTIVE_ROUND_FAILURES", 3, minimum=1
+    )
+    consecutive_failures = 0
+    platform_error = None
 
     for round_num in range(total_rounds):
         # Verificar si se recibió señal de salida
@@ -1450,7 +1631,22 @@ async def run_reddit_simulation(
             continue
 
         actions = {agent: LLMAction() for _, agent in active_agents}
-        await result.env.step(actions)
+        step_ok, step_error = await run_env_step_with_retries(
+            result.env, actions, "Reddit", round_num + 1, action_logger, main_logger
+        )
+        if not step_ok:
+            consecutive_failures += 1
+            if action_logger:
+                action_logger.log_round_end(round_num + 1, 0)
+            if consecutive_failures >= max_consecutive_failures:
+                platform_error = (
+                    f"Reddit acumuló {consecutive_failures} rondas fallidas consecutivas. "
+                    f"Último error: {step_error}"
+                )
+                break
+            continue
+
+        consecutive_failures = 0
 
         # Obtener las acciones realmente ejecutadas desde la base de datos y registrarlas
         actual_actions, last_rowid = fetch_new_actions_from_db(
@@ -1479,7 +1675,14 @@ async def run_reddit_simulation(
 
     # Nota: no cerrar el entorno, conservarlo para Interview
 
-    if action_logger:
+    if platform_error:
+        result.failed = True
+        result.error = platform_error
+        if main_logger:
+            main_logger.error(f"[Reddit] {platform_error}")
+        if action_logger:
+            action_logger.log_event("simulation_error", error=platform_error, total_actions=total_actions)
+    elif action_logger:
         action_logger.log_simulation_end(total_rounds, total_actions)
 
     result.total_actions = total_actions
@@ -1577,20 +1780,42 @@ async def main():
     reddit_result: Optional[PlatformSimulation] = None
 
     if args.twitter_only:
-        twitter_result = await run_twitter_simulation(config, simulation_dir, twitter_logger, log_manager, args.max_rounds)
-    elif args.reddit_only:
-        reddit_result = await run_reddit_simulation(config, simulation_dir, reddit_logger, log_manager, args.max_rounds)
-    else:
-        # Ejecución en paralelo (cada plataforma usa su propio registrador de logs)
-        results = await asyncio.gather(
+        twitter_result = await run_platform_safely(
+            "Twitter",
+            twitter_logger,
+            log_manager,
             run_twitter_simulation(config, simulation_dir, twitter_logger, log_manager, args.max_rounds),
+        )
+    elif args.reddit_only:
+        reddit_result = await run_platform_safely(
+            "Reddit",
+            reddit_logger,
+            log_manager,
             run_reddit_simulation(config, simulation_dir, reddit_logger, log_manager, args.max_rounds),
         )
-        twitter_result, reddit_result = results
+    else:
+        # Ejecución en paralelo (cada plataforma usa su propio registrador de logs)
+        twitter_result, reddit_result = await run_parallel_platforms(
+            config,
+            simulation_dir,
+            twitter_logger,
+            reddit_logger,
+            log_manager,
+            args.max_rounds,
+        )
 
     total_elapsed = (datetime.now() - start_time).total_seconds()
     log_manager.info("=" * 60)
     log_manager.info(f"Bucle de simulación completado! Tiempo total: {total_elapsed:.1f}s")
+
+    platform_failed = any(
+        result and result.failed for result in [twitter_result, reddit_result]
+    )
+    if platform_failed:
+        wait_for_commands = False
+        log_manager.warning(
+            "Se omite el modo de espera de comandos porque una plataforma falló"
+        )
 
     # Entrar en modo de espera de comandos si corresponde
     if wait_for_commands:

@@ -214,7 +214,7 @@ class ZepGraphMemoryUpdater:
     """
     
     # Tamaño del lote de envío (cuántas actividades acumular por plataforma antes de enviar)
-    BATCH_SIZE = 5
+    BATCH_SIZE = int(os.environ.get("ZEP_GRAPH_BATCH_SIZE", "20"))
     
     # Mapeo de nombres de plataforma (para visualización en consola)
     PLATFORM_DISPLAY_NAMES = {
@@ -223,11 +223,12 @@ class ZepGraphMemoryUpdater:
     }
     
     # Intervalo de envío (segundos) para evitar solicitudes demasiado rápidas
-    SEND_INTERVAL = 0.5
+    SEND_INTERVAL = float(os.environ.get("ZEP_GRAPH_SEND_INTERVAL", "1.0"))
     
     # Configuración de reintentos
     MAX_RETRIES = 3
     RETRY_DELAY = 2  # segundos
+    MAX_EPISODE_CHARS = int(os.environ.get("ZEP_GRAPH_MAX_EPISODE_CHARS", "16000"))
     
     def __init__(self, graph_id: str, api_key: Optional[str] = None):
         """
@@ -367,6 +368,7 @@ class ZepGraphMemoryUpdater:
                     
                     # Agregar actividad al buffer de la plataforma correspondiente
                     platform = activity.platform.lower()
+                    batch = None
                     with self._buffer_lock:
                         if platform not in self._platform_buffers:
                             self._platform_buffers[platform] = []
@@ -376,10 +378,10 @@ class ZepGraphMemoryUpdater:
                         if len(self._platform_buffers[platform]) >= self.BATCH_SIZE:
                             batch = self._platform_buffers[platform][:self.BATCH_SIZE]
                             self._platform_buffers[platform] = self._platform_buffers[platform][self.BATCH_SIZE:]
-                            # Enviar después de liberar el lock
-                            self._send_batch_activities(batch, platform)
-                            # Intervalo de envío para evitar solicitudes demasiado rápidas
-                            time.sleep(self.SEND_INTERVAL)
+
+                    if batch:
+                        self._send_batch_activities(batch, platform)
+                        time.sleep(self.SEND_INTERVAL)
                     
                 except Empty:
                     pass
@@ -402,6 +404,8 @@ class ZepGraphMemoryUpdater:
         # Combinar múltiples actividades en un texto, separadas por salto de línea
         episode_texts = [activity.to_episode_text() for activity in activities]
         combined_text = "\n".join(episode_texts)
+        if len(combined_text) > self.MAX_EPISODE_CHARS:
+            combined_text = combined_text[:self.MAX_EPISODE_CHARS] + "\n...[truncated]"
         
         # Enviar con reintentos
         for attempt in range(self.MAX_RETRIES):

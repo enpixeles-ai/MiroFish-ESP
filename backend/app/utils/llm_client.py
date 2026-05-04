@@ -14,6 +14,36 @@ from .logger import get_logger
 logger = get_logger('mirofish.llm_client')
 
 
+def _extract_json_object(text: str) -> Optional[str]:
+    """Extrae el primer objeto JSON balanceado desde una respuesta textual."""
+    start = text.find('{')
+    if start < 0:
+        return None
+
+    depth = 0
+    in_string = False
+    escaped = False
+    for index, char in enumerate(text[start:], start=start):
+        if escaped:
+            escaped = False
+            continue
+        if char == '\\':
+            escaped = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if char == '{':
+            depth += 1
+        elif char == '}':
+            depth -= 1
+            if depth == 0:
+                return text[start:index + 1]
+    return None
+
+
 class LLMClient:
     """Cliente LLM"""
 
@@ -133,7 +163,12 @@ class LLMClient:
         try:
             return json.loads(cleaned_response)
         except json.JSONDecodeError as e:
+            extracted_json = _extract_json_object(cleaned_response)
+            if extracted_json and extracted_json != cleaned_response:
+                try:
+                    return json.loads(extracted_json)
+                except json.JSONDecodeError:
+                    pass
             logger.error(f"Error al parsear JSON del LLM: {e}")
             logger.error(f"Respuesta completa del LLM: {cleaned_response[:2000]}")
             raise ValueError(f"Formato JSON inválido retornado por LLM: {cleaned_response}")
-

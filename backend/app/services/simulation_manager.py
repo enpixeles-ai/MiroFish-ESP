@@ -475,7 +475,24 @@ class SimulationManager:
                     if project_id is None or state.project_id == project_id:
                         simulations.append(state)
         
+        simulations.sort(key=lambda state: state.created_at or state.updated_at or "", reverse=True)
         return simulations
+
+    def delete_simulation(self, simulation_id: str) -> Dict[str, Any]:
+        """Eliminar los archivos persistidos de una simulación."""
+        sim_dir = os.path.join(self.SIMULATION_DATA_DIR, simulation_id)
+        if not os.path.isdir(sim_dir):
+            raise ValueError(f"La simulación no existe: {simulation_id}")
+
+        state = self._load_simulation_state(simulation_id)
+        shutil.rmtree(sim_dir)
+        self._simulations.pop(simulation_id, None)
+
+        return {
+            "simulation_id": simulation_id,
+            "project_id": state.project_id if state else "",
+            "deleted": True,
+        }
     
     def get_profiles(self, simulation_id: str, platform: str = "reddit") -> List[Dict[str, Any]]:
         """Obtener perfil de agente de la simulación"""

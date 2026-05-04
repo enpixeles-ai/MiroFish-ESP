@@ -549,7 +549,7 @@ Flujo funcional:
 # ── Prompt de planificación de esquema ──
 
 PLAN_SYSTEM_PROMPT = """\
-Responde siempre en español latino. No uses inglés en ningún caso.
+Responde contenido narrativo en español latino. Conserva nombres técnicos, claves JSON y nombres de herramientas exactamente cuando el sistema los requiera.
 
 Eres un experto en redacción de «Informes de Predicción Futura», con una «visión divina» del mundo simulado — puedes observar el comportamiento, los discursos y las interacciones de cada Agent en la simulación.
 
@@ -614,7 +614,7 @@ Según los resultados de predicción, diseña la estructura de secciones más ad
 # ── Prompt de generación de secciones ──
 
 SECTION_SYSTEM_PROMPT_TEMPLATE = """\
-Responde siempre en español latino. No uses inglés en ningún caso.
+Responde contenido narrativo en español latino. Conserva nombres técnicos, claves JSON y nombres de herramientas exactamente cuando el sistema los requiera.
 
 Eres un experto en redacción de «Informes de Predicción Futura» y estás redactando una sección del informe.
 
@@ -830,7 +830,7 @@ REACT_FORCE_FINAL_MSG = "Se ha alcanzado el límite de llamadas a herramientas. 
 # ── Prompt de chat ──
 
 CHAT_SYSTEM_PROMPT_TEMPLATE = """\
-Responde siempre en español latino. No uses inglés en ningún caso.
+Responde contenido narrativo en español latino. Conserva nombres técnicos, claves JSON y nombres de herramientas exactamente cuando el sistema los requiera.
 
 Eres un asistente de predicción de simulaciones conciso y eficiente.
 

@@ -50,6 +50,21 @@ else:
 import re
 
 
+def _env_int(name: str, default: int, minimum: int = 1) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return max(minimum, int(raw))
+    except (TypeError, ValueError):
+        return default
+
+
+def get_oasis_semaphore(platform: str = "twitter") -> int:
+    default_limit = _env_int("MIROFISH_OASIS_SEMAPHORE", 8)
+    return _env_int(f"MIROFISH_{platform.upper()}_SEMAPHORE", default_limit)
+
+
 class UnicodeFormatter(logging.Formatter):
     """Formateador personalizado que convierte secuencias de escape Unicode a caracteres legibles"""
 
@@ -125,6 +140,9 @@ try:
         ManualAction,
         generate_twitter_agent_graph
     )
+    from oasis_runtime_limits import configure_camel_runtime_limits
+
+    configure_camel_runtime_limits()
 except ImportError as e:
     print(f"Error: dependencia faltante {e}")
     print("Por favor instala primero: pip install oasis-ai camel-ai")
@@ -589,11 +607,13 @@ class TwitterSimulationRunner:
 
         # Crear el entorno
         print("Creando entorno OASIS...")
+        semaphore = get_oasis_semaphore("twitter")
+        print(f"Concurrencia OASIS: {semaphore}")
         self.env = oasis.make(
             agent_graph=self.agent_graph,
             platform=oasis.DefaultPlatformType.TWITTER,
             database_path=db_path,
-            semaphore=30,  # Limitar el máximo de solicitudes LLM concurrentes para evitar sobrecarga de la API
+            semaphore=semaphore,
         )
 
         await self.env.reset()

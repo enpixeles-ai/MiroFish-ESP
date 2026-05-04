@@ -183,6 +183,19 @@
             <div class="modal-playback-hint">
               <span class="hint-text">El Paso 3 «Iniciar simulación» y el Paso 5 «Interacción profunda» deben iniciarse en ejecución activa, no soportan reproducción histórica</span>
             </div>
+
+            <div class="modal-maintenance">
+              <button
+                class="modal-delete-btn"
+                @click="deleteSelectedProject"
+                :disabled="!canDeleteSelected || deletingId === selectedProject.simulation_id"
+                :title="canDeleteSelected ? 'Eliminar simulación' : 'Detén la simulación antes de eliminarla'"
+              >
+                <span class="btn-icon">×</span>
+                <span>{{ deletingId === selectedProject.simulation_id ? 'Eliminando...' : 'Eliminar simulación' }}</span>
+              </button>
+              <span v-if="deleteError" class="modal-delete-error">{{ deleteError }}</span>
+            </div>
           </div>
         </div>
       </Transition>
@@ -193,7 +206,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, onActivated, watch, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { getSimulationHistory } from '../api/simulation'
+import { deleteSimulation, getSimulationHistory } from '../api/simulation'
 
 const router = useRouter()
 const route = useRoute()
@@ -205,6 +218,8 @@ const isExpanded = ref(false)
 const hoveringCard = ref(null)
 const historyContainer = ref(null)
 const selectedProject = ref(null)  // Proyecto actualmente seleccionado (para ventana emergente)
+const deletingId = ref(null)
+const deleteError = ref('')
 let observer = null
 let isAnimating = false  // Bloqueo de animación para evitar parpadeo
 let expandDebounceTimer = null  // Temporizador de debounce
@@ -234,6 +249,11 @@ const containerStyle = computed(() => {
   const expandedHeight = rows * CARD_HEIGHT + (rows - 1) * CARD_GAP + 10
   
   return { minHeight: `${expandedHeight}px` }
+})
+
+const canDeleteSelected = computed(() => {
+  if (!selectedProject.value) return false
+  return !['running', 'starting'].includes(getNormalizedStatus(selectedProject.value))
 })
 
 // Obtener estilo de tarjeta
@@ -292,17 +312,27 @@ const getCardStyle = (index) => {
 const getProgressClass = (simulation) => {
   const current = simulation.current_round || 0
   const total = simulation.total_rounds || 0
+  const status = getNormalizedStatus(simulation)
   
-  if (total === 0 || current === 0) {
+  if (status === 'failed') {
+    return 'failed'
+  } else if (['paused', 'stopped'].includes(status)) {
+    return 'paused'
+  } else if (status === 'running' || status === 'starting') {
+    return 'in-progress'
+  } else if (status === 'completed' || (total > 0 && current >= total)) {
+    return 'completed'
+  } else if (total === 0 || current === 0) {
     // No iniciado
     return 'not-started'
-  } else if (current >= total) {
-    // Completado
-    return 'completed'
   } else {
     // En progreso
     return 'in-progress'
   }
+}
+
+const getNormalizedStatus = (simulation) => {
+  return (simulation?.runner_status || simulation?.status || '').toLowerCase()
 }
 
 // Formatear fecha (mostrar solo la parte de fecha)
@@ -353,8 +383,15 @@ const formatSimulationId = (simulationId) => {
 const formatRounds = (simulation) => {
   const current = simulation.current_round || 0
   const total = simulation.total_rounds || 0
+  const status = getNormalizedStatus(simulation)
+  const roundText = total === 0 ? 'No iniciado' : `${current}/${total} rondas`
+  if (status === 'failed') return `Fallida · ${roundText}`
+  if (status === 'paused') return `Pausada · ${roundText}`
+  if (status === 'stopped') return `Detenida · ${roundText}`
+  if (status === 'running' || status === 'starting') return `Activa · ${roundText}`
+  if (status === 'completed') return `Completa · ${roundText}`
   if (total === 0) return 'No iniciado'
-  return `${current}/${total} rondas`
+  return roundText
 }
 
 // Obtener tipo de archivo (para estilos)
@@ -399,6 +436,32 @@ const navigateToProject = (simulation) => {
 // Cerrar ventana emergente
 const closeModal = () => {
   selectedProject.value = null
+  deleteError.value = ''
+}
+
+const deleteSelectedProject = async () => {
+  const simulation = selectedProject.value
+  if (!simulation || !canDeleteSelected.value || deletingId.value) return
+
+  const confirmed = window.confirm('Eliminar esta simulación del historial?')
+  if (!confirmed) return
+
+  deletingId.value = simulation.simulation_id
+  deleteError.value = ''
+
+  try {
+    const response = await deleteSimulation(simulation.simulation_id)
+    if (!response.success) {
+      throw new Error(response.error || 'No se pudo eliminar la simulación')
+    }
+
+    projects.value = projects.value.filter(project => project.simulation_id !== simulation.simulation_id)
+    closeModal()
+  } catch (error) {
+    deleteError.value = error?.response?.data?.error || error.message || 'No se pudo eliminar'
+  } finally {
+    deletingId.value = null
+  }
 }
 
 // Navegar a la página de Construcción del grafo (Project)
@@ -748,6 +811,8 @@ onUnmounted(() => {
 .card-progress.completed { color: #10B981; }    /* Completado - verde */
 .card-progress.in-progress { color: #F59E0B; }  /* En progreso - naranja */
 .card-progress.not-started { color: #9CA3AF; }  /* No iniciado - gris */
+.card-progress.failed { color: #DC2626; }
+.card-progress.paused { color: #6B7280; }
 .card-status.pending { color: #9CA3AF; }
 
 /* Área de lista de archivos */
@@ -950,6 +1015,8 @@ onUnmounted(() => {
 .card-footer .card-progress.completed { color: #10B981; }
 .card-footer .card-progress.in-progress { color: #F59E0B; }
 .card-footer .card-progress.not-started { color: #9CA3AF; }
+.card-footer .card-progress.failed { color: #DC2626; }
+.card-footer .card-progress.paused { color: #6B7280; }
 
 /* Línea decorativa inferior */
 .card-bottom-line {
@@ -1105,6 +1172,8 @@ onUnmounted(() => {
 .modal-progress.completed { color: #10B981; background: rgba(16, 185, 129, 0.1); }
 .modal-progress.in-progress { color: #F59E0B; background: rgba(245, 158, 11, 0.1); }
 .modal-progress.not-started { color: #9CA3AF; background: #F3F4F6; }
+.modal-progress.failed { color: #DC2626; background: rgba(220, 38, 38, 0.08); }
+.modal-progress.paused { color: #6B7280; background: #F3F4F6; }
 
 .modal-create-time {
   font-family: 'JetBrains Mono', monospace;
@@ -1336,5 +1405,55 @@ onUnmounted(() => {
   letter-spacing: 0.3px;
   text-align: center;
   line-height: 1.5;
+}
+
+.modal-maintenance {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0 32px 24px;
+  background: #FFFFFF;
+}
+
+.modal-delete-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding: 0 12px;
+  border: 1px solid rgba(220, 38, 38, 0.24);
+  border-radius: 6px;
+  background: #FFFFFF;
+  color: #B91C1C;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.modal-delete-btn:hover:not(:disabled) {
+  border-color: #DC2626;
+  background: rgba(220, 38, 38, 0.06);
+}
+
+.modal-delete-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.modal-delete-error {
+  color: #DC2626;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.7rem;
+  text-align: right;
+}
+
+@media (max-width: 768px) {
+  .modal-maintenance {
+    align-items: stretch;
+    flex-direction: column;
+  }
 }
 </style>

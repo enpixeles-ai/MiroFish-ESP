@@ -44,6 +44,20 @@ class RunnerStatus(str, Enum):
     FAILED = "failed"
 
 
+TERMINAL_RUN_STATUSES = {
+    RunnerStatus.STOPPED,
+    RunnerStatus.COMPLETED,
+    RunnerStatus.FAILED,
+}
+
+ACTIVE_RUN_STATUSES = {
+    RunnerStatus.STARTING,
+    RunnerStatus.RUNNING,
+    RunnerStatus.PAUSED,
+    RunnerStatus.STOPPING,
+}
+
+
 @dataclass
 class AgentAction:
     """Registro de acción de un Agente"""
@@ -230,13 +244,48 @@ class SimulationRunner:
     def get_run_state(cls, simulation_id: str) -> Optional[SimulationRunState]:
         """Obtener estado de ejecución"""
         if simulation_id in cls._run_states:
-            return cls._run_states[simulation_id]
+            state = cls._run_states[simulation_id]
+            cls._reconcile_process_state(state)
+            return state
         
         # Intentar cargar desde archivo
         state = cls._load_run_state(simulation_id)
         if state:
+            cls._reconcile_process_state(state)
             cls._run_states[simulation_id] = state
         return state
+
+    @classmethod
+    def _is_managed_process_alive(cls, simulation_id: str, pid: Optional[int]) -> bool:
+        process = cls._processes.get(simulation_id)
+        if process and process.poll() is None:
+            return True
+
+        if not pid or IS_WINDOWS:
+            return False
+
+        proc_cmdline = f"/proc/{pid}/cmdline"
+        try:
+            with open(proc_cmdline, "rb") as f:
+                cmdline = f.read().decode("utf-8", errors="ignore").replace("\x00", " ")
+            return simulation_id in cmdline and "run_" in cmdline and "simulation.py" in cmdline
+        except Exception:
+            return False
+
+    @classmethod
+    def _reconcile_process_state(cls, state: SimulationRunState):
+        if state.runner_status not in ACTIVE_RUN_STATUSES:
+            return
+
+        if cls._is_managed_process_alive(state.simulation_id, state.process_pid):
+            return
+
+        state.runner_status = RunnerStatus.FAILED
+        state.twitter_running = False
+        state.reddit_running = False
+        state.completed_at = state.completed_at or datetime.now().isoformat()
+        state.error = state.error or "El proceso de simulación no existe; se marcó como fallida para evitar estado running falso"
+        cls._save_run_state(state)
     
     @classmethod
     def _load_run_state(cls, simulation_id: str) -> Optional[SimulationRunState]:
@@ -520,9 +569,13 @@ class SimulationRunner:
             exit_code = process.returncode
             
             if exit_code == 0:
-                state.runner_status = RunnerStatus.COMPLETED
-                state.completed_at = datetime.now().isoformat()
-                logger.info(f"Simulación completada: {simulation_id}")
+                if state.runner_status == RunnerStatus.FAILED:
+                    state.completed_at = datetime.now().isoformat()
+                    logger.error(f"Simulación finalizada con errores de plataforma: {simulation_id}, error={state.error}")
+                else:
+                    state.runner_status = RunnerStatus.COMPLETED
+                    state.completed_at = datetime.now().isoformat()
+                    logger.info(f"Simulación completada: {simulation_id}")
             else:
                 state.runner_status = RunnerStatus.FAILED
                 # Leer la información de error del archivo de log principal
@@ -654,6 +707,16 @@ class SimulationRunner:
                                         state.current_round = round_num
                                     # El tiempo global es el máximo de las dos plataformas
                                     state.simulated_hours = max(state.twitter_simulated_hours, state.reddit_simulated_hours)
+
+                                elif event_type == "simulation_error":
+                                    error = action_data.get("error") or f"Error en plataforma {platform}"
+                                    state.runner_status = RunnerStatus.FAILED
+                                    state.error = error
+                                    if platform == "twitter":
+                                        state.twitter_running = False
+                                    elif platform == "reddit":
+                                        state.reddit_running = False
+                                    logger.error(f"Error de simulación reportado por {platform}: {state.simulation_id}, error={error}")
                                 
                                 continue
                             
@@ -767,6 +830,39 @@ class SimulationRunner:
                 logger.warning(f"El grupo de procesos no respondió a SIGTERM; forzando terminación: {simulation_id}")
                 os.killpg(pgid, signal.SIGKILL)
                 process.wait(timeout=5)
+
+    @classmethod
+    def _terminate_pid_group(cls, pid: Optional[int], simulation_id: str, timeout: int = 10):
+        """Terminar un grupo de procesos cuando solo queda el PID persistido."""
+        if not pid or IS_WINDOWS:
+            return
+
+        if not cls._is_managed_process_alive(simulation_id, pid):
+            return
+
+        try:
+            pgid = os.getpgid(pid)
+            logger.info(f"Terminando grupo de procesos persistido: simulation={simulation_id}, pgid={pgid}")
+            os.killpg(pgid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        except Exception as e:
+            logger.warning(f"No se pudo enviar SIGTERM al grupo persistido: {simulation_id}, error={e}")
+            return
+
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if not cls._is_managed_process_alive(simulation_id, pid):
+                return
+            time.sleep(0.2)
+
+        try:
+            logger.warning(f"El grupo persistido no respondió a SIGTERM; forzando: {simulation_id}")
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+        except Exception as e:
+            logger.warning(f"No se pudo enviar SIGKILL al grupo persistido: {simulation_id}, error={e}")
     
     @classmethod
     def stop_simulation(cls, simulation_id: str) -> SimulationRunState:
@@ -775,6 +871,22 @@ class SimulationRunner:
         if not state:
             raise ValueError(f"La simulación no existe: {simulation_id}")
         
+        if state.runner_status in TERMINAL_RUN_STATUSES:
+            process = cls._processes.get(simulation_id)
+            if process and process.poll() is None:
+                try:
+                    cls._terminate_process(process, simulation_id)
+                except Exception as e:
+                    logger.warning(f"No se pudo terminar proceso terminal activo: {simulation_id}, error={e}")
+            else:
+                cls._terminate_pid_group(state.process_pid, simulation_id)
+
+            if state.twitter_running or state.reddit_running:
+                state.twitter_running = False
+                state.reddit_running = False
+                cls._save_run_state(state)
+            return state
+
         if state.runner_status not in [RunnerStatus.RUNNING, RunnerStatus.PAUSED]:
             raise ValueError(f"La simulación no está en ejecución: {simulation_id}, status={state.runner_status}")
         
@@ -1760,4 +1872,3 @@ class SimulationRunner:
             results = results[:limit]
         
         return results
-
