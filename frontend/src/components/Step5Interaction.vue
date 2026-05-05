@@ -387,6 +387,18 @@
                   </svg>
                   <span>Descargar Resultados</span>
                 </button>
+                <button class="download-survey-btn" @click="downloadSurveySummary" title="Descargar resumen ejecutivo para otro LLM">
+                  <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M4 4h16v16H4z"></path>
+                    <path d="M8 8h8"></path>
+                    <path d="M8 12h8"></path>
+                    <path d="M8 16h5"></path>
+                  </svg>
+                  <span>Resumen</span>
+                </button>
+                <button class="download-survey-btn" @click="downloadSurveyJson" title="Descargar datos completos en JSON">
+                  <span>JSON</span>
+                </button>
               </div>
             </div>
             <div class="survey-analysis-card">
@@ -415,6 +427,16 @@
                     <div class="keyword-bar" :style="{ width: item.percent + '%' }"></div>
                   </div>
                   <span class="keyword-count">{{ item.count }}</span>
+                </div>
+              </div>
+              <div class="analysis-summary">
+                <div class="summary-block">
+                  <span class="metric-label">Resumen general</span>
+                  <p>{{ surveyConsensus.executiveSummary }}</p>
+                </div>
+                <div class="summary-block">
+                  <span class="metric-label">Proyección accionable</span>
+                  <p>{{ surveyConsensus.projection }}</p>
                 </div>
               </div>
             </div>
@@ -488,8 +510,13 @@ const INTERVIEW_PLATFORM = 'reddit'
 const SURVEY_STOPWORDS = new Set([
   'para', 'porque', 'como', 'pero', 'este', 'esta', 'estos', 'estas', 'tienen',
   'tiene', 'sobre', 'desde', 'donde', 'cuando', 'cual', 'cuales', 'que', 'con',
-  'una', 'uno', 'los', 'las', 'del', 'por', 'sus', 'son', 'ser', 'mas', 'muy',
-  'sin', 'hay', 'debe', 'deben', 'puede', 'pueden', 'negocio', 'negocios'
+  'una', 'uno', 'unos', 'unas', 'los', 'las', 'del', 'por', 'sus', 'son', 'ser',
+  'mas', 'muy', 'sin', 'hay', 'debe', 'deben', 'puede', 'pueden', 'podria',
+  'podrian', 'manera', 'forma', 'nuestro', 'nuestra', 'nuestros', 'nuestras',
+  'respuesta', 'directa', 'confianza', 'alta', 'media', 'baja', 'agente',
+  'agentes', 'servicio', 'servicios', 'proceso', 'procesos', 'tarea', 'tareas',
+  'automatizacion', 'automatizar', 'ayudaria', 'ayudarian', 'negocio',
+  'negocios', 'necesidad', 'necesidades', 'inmediata', 'inmediato'
 ])
 
 // Report Data
@@ -499,6 +526,22 @@ const collapsedSections = ref(new Set())
 const currentSectionIndex = ref(null)
 const profiles = ref([])
 const answeredSurveyCount = computed(() => surveyResults.value.filter(result => result.answered).length)
+
+const normalizeWords = (text) => {
+  return String(text || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9ñ\s]/gi, ' ')
+    .split(/\s+/)
+    .filter(Boolean)
+}
+
+const surveyQuestionTerms = computed(() => {
+  const question = surveyResults.value[0]?.question || surveyQuestion.value
+  return new Set(normalizeWords(question).filter(word => word.length >= 4))
+})
+
 const surveyAnalysis = computed(() => {
   const answered = surveyResults.value.filter(result => result.answered && result.answer)
   const responseRate = surveyResults.value.length
@@ -514,12 +557,12 @@ const surveyAnalysis = computed(() => {
     if (text.includes('confianza: media')) confidenceCounts.media += 1
     if (text.includes('confianza: baja')) confidenceCounts.baja += 1
 
-    const words = text
-      .normalize('NFD')
-      .replace(/[\u0300-\u036f]/g, '')
-      .replace(/[^a-z0-9ñ\s]/gi, ' ')
-      .split(/\s+/)
-      .filter(word => word.length >= 5 && !SURVEY_STOPWORDS.has(word))
+    const words = normalizeWords(text)
+      .filter(word => (
+        word.length >= 5
+        && !SURVEY_STOPWORDS.has(word)
+        && !surveyQuestionTerms.value.has(word)
+      ))
 
     for (const word of words) {
       counts.set(word, (counts.get(word) || 0) + 1)
@@ -546,8 +589,36 @@ const surveyAnalysis = computed(() => {
   return {
     responseRate,
     confidenceLabel: confidence,
+    confidenceCounts,
     topSignal: keywordsWithPercent[0]?.word || '',
     keywords: keywordsWithPercent
+  }
+})
+
+const surveyConsensus = computed(() => {
+  const total = surveyResults.value.length
+  const answered = surveyResults.value.filter(result => result.answered && result.answer)
+  const terms = surveyAnalysis.value.keywords.slice(0, 5).map(item => item.word)
+  const termText = terms.length ? terms.join(', ') : 'sin señales suficientes'
+
+  if (!total) {
+    return {
+      executiveSummary: 'No hay resultados disponibles todavía.',
+      projection: 'Ejecuta una encuesta para generar lectura de consenso y proyección.'
+    }
+  }
+
+  const executiveSummary = answered.length
+    ? `La muestra tiene ${answered.length}/${total} respuestas reales. El consenso preliminar apunta a ${termText}, filtrando palabras copiadas de la pregunta para evitar ruido.`
+    : `No hubo respuestas reales en esta encuesta. Conviene revisar perfiles seleccionados, estado de simulación y pregunta antes de interpretar el resultado.`
+
+  const projection = answered.length
+    ? `Próxima hipótesis comercial: validar una oferta de agentes IA centrada en ${terms.slice(0, 3).join(', ') || 'las necesidades detectadas'}, con prioridad por urgencia operativa, valor económico inmediato y facilidad de implementación.`
+    : 'No proyectar demanda con esta muestra; primero se necesita recuperar respuestas válidas.'
+
+  return {
+    executiveSummary,
+    projection
   }
 })
 
@@ -936,6 +1007,39 @@ const clearAgentSelection = () => {
   selectedAgents.value = new Set()
 }
 
+const buildSurveyPrompt = (question, agent) => {
+  const profileLines = [
+    agent?.username ? `Identidad: ${agent.username}` : null,
+    agent?.profession ? `Rol/actividad: ${agent.profession}` : null,
+    agent?.bio ? `Perfil: ${agent.bio}` : null
+  ].filter(Boolean).join('\n')
+
+  return [
+    'MODO ENCUESTA ESTRICTA MIROFISH',
+    '',
+    'Responde como este individuo simulado, no como asesor general.',
+    profileLines ? `Contexto del encuestado:\n${profileLines}` : '',
+    '',
+    `Pregunta exacta de la encuesta:\n"${question}"`,
+    '',
+    'Reglas obligatorias:',
+    '- Responde solamente la pregunta exacta.',
+    '- No repitas la pregunta.',
+    '- No expliques MiroFish, ProVisión, EnPíxeles ni la simulación, salvo que ese sea literalmente tu propio perfil.',
+    '- No hables de automatización en abstracto: aterriza necesidades concretas de tu negocio, comunidad o rol.',
+    '- Si no hay información suficiente en tu perfil, responde con una hipótesis prudente y marca confianza baja.',
+    '',
+    'Formato obligatorio:',
+    'Respuesta directa: [1 o 2 frases concretas]',
+    'Servicios o agentes IA que necesitaría ahora:',
+    '1. [servicio/agente concreto] | Automatiza: [proceso específico] | Urgencia: [alta/media/baja] | Motivo: [por qué lo necesita]',
+    '2. [servicio/agente concreto] | Automatiza: [proceso específico] | Urgencia: [alta/media/baja] | Motivo: [por qué lo necesita]',
+    '3. [servicio/agente concreto] | Automatiza: [proceso específico] | Urgencia: [alta/media/baja] | Motivo: [por qué lo necesita]',
+    'Compra probable: [sí/no/tal vez] - [razón breve]',
+    'Confianza: [alta/media/baja]'
+  ].filter(Boolean).join('\n')
+}
+
 const submitSurvey = async () => {
   if (selectedAgents.value.size === 0 || !surveyQuestion.value.trim()) return
   
@@ -943,10 +1047,14 @@ const submitSurvey = async () => {
   addLog(`Enviando encuesta a ${selectedAgents.value.size} destinatarios...`)
   
   try {
-    const interviews = Array.from(selectedAgents.value).map(idx => ({
-      agent_id: idx,
-      prompt: surveyQuestion.value.trim()
-    }))
+    const question = surveyQuestion.value.trim()
+    const interviews = Array.from(selectedAgents.value).map(idx => {
+      const agent = profiles.value[idx]
+      return {
+        agent_id: idx,
+        prompt: buildSurveyPrompt(question, agent)
+      }
+    })
 
     const surveyResultsList = []
     const batches = chunkArray(interviews, SURVEY_BATCH_SIZE)
@@ -979,7 +1087,7 @@ const submitSurvey = async () => {
             agent_id: agentIdx,
             agent_name: agent?.username || `Agent ${agentIdx}`,
             profession: agent?.profession,
-            question: surveyQuestion.value.trim(),
+            question,
             answer: extracted.answer || `Sin respuesta${extracted.error ? `: ${extracted.error}` : ''}`,
             platform: extracted.platform || INTERVIEW_PLATFORM,
             answered: Boolean(extracted.answer)
@@ -994,7 +1102,7 @@ const submitSurvey = async () => {
             agent_id: agentIdx,
             agent_name: agent?.username || `Agent ${agentIdx}`,
             profession: agent?.profession,
-            question: surveyQuestion.value.trim(),
+            question,
             answer: `Sin respuesta: ${batchError.message}`,
             platform: INTERVIEW_PLATFORM,
             answered: false
@@ -1012,6 +1120,48 @@ const submitSurvey = async () => {
     addLog(`Error al enviar encuesta: ${err.message}`)
   } finally {
     isSurveying.value = false
+  }
+}
+
+const downloadFile = (content, filename, type = 'text/plain;charset=utf-8') => {
+  const blob = new Blob([content], { type })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(url)
+}
+
+const buildSurveyExportPayload = () => {
+  return {
+    generated_at: new Date().toISOString(),
+    simulation_id: props.simulationId,
+    question: surveyResults.value[0]?.question || surveyQuestion.value,
+    metrics: {
+      total_responses: surveyResults.value.length,
+      answered_responses: answeredSurveyCount.value,
+      response_rate: surveyAnalysis.value.responseRate,
+      confidence_average: surveyAnalysis.value.confidenceLabel,
+      confidence_counts: surveyAnalysis.value.confidenceCounts,
+      top_signal: surveyAnalysis.value.topSignal,
+      frequent_terms: surveyAnalysis.value.keywords.map(item => ({
+        term: item.word,
+        count: item.count
+      }))
+    },
+    consensus: surveyConsensus.value,
+    responses: surveyResults.value.map(result => ({
+      agent_id: result.agent_id,
+      agent_name: result.agent_name,
+      profession: result.profession || null,
+      platform: result.platform || null,
+      answered: Boolean(result.answered),
+      question: result.question,
+      answer: result.answer || ''
+    }))
   }
 }
 
@@ -1037,6 +1187,8 @@ const downloadSurveyResults = () => {
   if (surveyAnalysis.value.keywords.length) {
     txt += `Temas frecuentes: ${surveyAnalysis.value.keywords.map(item => `${item.word} (${item.count})`).join(', ')}\n`
   }
+  txt += `Resumen general: ${surveyConsensus.value.executiveSummary}\n`
+  txt += `Proyección: ${surveyConsensus.value.projection}\n`
   txt += `\n`
   txt += `${divider}\n`
   txt += `PREGUNTA DE LA ENCUESTA\n`
@@ -1061,15 +1213,58 @@ const downloadSurveyResults = () => {
   txt += `Generado con MiroFish en Español - EnPíxeles Lab\n`
   txt += `${sep}\n`
 
-  const blob = new Blob([txt], { type: 'text/plain;charset=utf-8' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = `encuesta_${now.toISOString().slice(0, 10)}_${now.getHours()}h${String(now.getMinutes()).padStart(2,'0')}.txt`
-  document.body.appendChild(a)
-  a.click()
-  document.body.removeChild(a)
-  URL.revokeObjectURL(url)
+  downloadFile(
+    txt,
+    `encuesta_${now.toISOString().slice(0, 10)}_${now.getHours()}h${String(now.getMinutes()).padStart(2,'0')}.txt`
+  )
+}
+
+const downloadSurveyJson = () => {
+  if (!surveyResults.value.length) return
+
+  const now = new Date()
+  const payload = buildSurveyExportPayload()
+  downloadFile(
+    JSON.stringify(payload, null, 2),
+    `encuesta_datos_${now.toISOString().slice(0, 10)}_${now.getHours()}h${String(now.getMinutes()).padStart(2,'0')}.json`,
+    'application/json;charset=utf-8'
+  )
+}
+
+const downloadSurveySummary = () => {
+  if (!surveyResults.value.length) return
+
+  const now = new Date()
+  const payload = buildSurveyExportPayload()
+  const topTerms = payload.metrics.frequent_terms.map(item => `${item.term} (${item.count})`).join(', ') || 'Sin señales suficientes'
+
+  let md = `# Resumen de encuesta MiroFish\n\n`
+  md += `Fecha: ${payload.generated_at}\n\n`
+  md += `Simulación: ${payload.simulation_id}\n\n`
+  md += `## Pregunta\n\n${payload.question}\n\n`
+  md += `## Lectura ejecutiva\n\n${payload.consensus.executiveSummary}\n\n`
+  md += `## Proyección accionable\n\n${payload.consensus.projection}\n\n`
+  md += `## Métricas\n\n`
+  md += `- Respuestas reales: ${payload.metrics.answered_responses}/${payload.metrics.total_responses}\n`
+  md += `- Tasa de respuesta: ${payload.metrics.response_rate}%\n`
+  md += `- Confianza promedio: ${payload.metrics.confidence_average}\n`
+  md += `- Señal dominante: ${payload.metrics.top_signal || 'Sin señal'}\n`
+  md += `- Términos frecuentes filtrados: ${topTerms}\n\n`
+  md += `## Prompt sugerido para análisis profundo\n\n`
+  md += `Analiza esta encuesta como investigador de mercado y estratega de producto. Separa señales reales de ruido, detecta patrones de demanda, segmentos, urgencia, objeciones, disposición de compra y oportunidades de oferta. Entrega: 1) consenso, 2) discrepancias, 3) oportunidades comerciales, 4) riesgos de interpretación, 5) propuesta de próximos experimentos, 6) proyección de demanda con confianza.\n\n`
+  md += `## Respuestas completas\n\n`
+
+  payload.responses.forEach((result, idx) => {
+    md += `### ${idx + 1}. ${result.agent_name || `Agent ${result.agent_id}`}\n\n`
+    if (result.profession) md += `Rol: ${result.profession}\n\n`
+    md += `${result.answer || 'Sin respuesta'}\n\n`
+  })
+
+  downloadFile(
+    md,
+    `encuesta_resumen_${now.toISOString().slice(0, 10)}_${now.getHours()}h${String(now.getMinutes()).padStart(2,'0')}.md`,
+    'text/markdown;charset=utf-8'
+  )
 }
 
 // Load Report Data
@@ -2617,6 +2812,8 @@ watch(() => props.simulationId, (newId) => {
 .results-header-right {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 12px;
 }
 
@@ -2722,6 +2919,26 @@ watch(() => props.simulationId, (newId) => {
   height: 100%;
   background: #10B981;
   border-radius: inherit;
+}
+
+.analysis-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid #EEF2F7;
+}
+
+.summary-block {
+  min-width: 0;
+}
+
+.summary-block p {
+  margin: 6px 0 0;
+  color: #374151;
+  font-size: 13px;
+  line-height: 1.55;
 }
 
 .results-list {

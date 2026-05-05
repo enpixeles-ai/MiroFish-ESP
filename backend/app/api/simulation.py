@@ -151,6 +151,7 @@ def _fallback_interview_agent(
     selected_platform = _select_interview_platform(manager, simulation_id, platform)
     profile, profile_index = _get_agent_profile(manager, simulation_id, selected_platform, int(agent_id))
     context = _build_fallback_context(simulation_id, selected_platform, int(agent_id))
+    is_strict_survey = "MODO ENCUESTA ESTRICTA MIROFISH" in prompt
 
     profile_summary = {
         "user_id": profile.get("user_id", profile_index),
@@ -168,7 +169,8 @@ def _fallback_interview_agent(
                 "Eres un individuo simulado dentro de MiroFish. Responde en primera persona, "
                 "en español claro, usando solo el perfil y las acciones registradas. "
                 "No digas que eres un modelo de IA. Si la simulación está parcial o fallida, "
-                "responde con prudencia y baja confianza, sin inventar datos."
+                "responde con prudencia y baja confianza, sin inventar datos. "
+                "Si recibes una encuesta estricta, responde solo la pregunta y respeta el formato solicitado."
             ),
         },
         {
@@ -177,8 +179,11 @@ def _fallback_interview_agent(
                 f"Perfil del agente:\n{json.dumps(profile_summary, ensure_ascii=False, indent=2)}\n\n"
                 f"Contexto de simulación:\n{context}\n\n"
                 f"Pregunta:\n{prompt}\n\n"
-                "Entrega una respuesta útil de 2 a 5 párrafos. Si aplica, agrega una línea final "
-                "con 'Confianza:' alta, media o baja."
+                + (
+                    "Respeta exactamente el formato pedido en la encuesta. No agregues introducciones ni conclusiones generales."
+                    if is_strict_survey
+                    else "Entrega una respuesta útil de 2 a 5 párrafos. Si aplica, agrega una línea final con 'Confianza:' alta, media o baja."
+                )
             ),
         },
     ]
