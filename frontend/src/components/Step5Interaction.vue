@@ -389,6 +389,35 @@
                 </button>
               </div>
             </div>
+            <div class="survey-analysis-card">
+              <div class="analysis-metrics">
+                <div class="analysis-metric">
+                  <span class="metric-label">Tasa de respuesta</span>
+                  <strong>{{ surveyAnalysis.responseRate }}%</strong>
+                </div>
+                <div class="analysis-metric">
+                  <span class="metric-label">Confianza promedio</span>
+                  <strong>{{ surveyAnalysis.confidenceLabel }}</strong>
+                </div>
+                <div class="analysis-metric">
+                  <span class="metric-label">Señal dominante</span>
+                  <strong>{{ surveyAnalysis.topSignal || 'Sin señal' }}</strong>
+                </div>
+              </div>
+              <div v-if="surveyAnalysis.keywords.length" class="keyword-chart">
+                <div 
+                  v-for="item in surveyAnalysis.keywords" 
+                  :key="item.word"
+                  class="keyword-row"
+                >
+                  <span class="keyword-label">{{ item.word }}</span>
+                  <div class="keyword-bar-track">
+                    <div class="keyword-bar" :style="{ width: item.percent + '%' }"></div>
+                  </div>
+                  <span class="keyword-count">{{ item.count }}</span>
+                </div>
+              </div>
+            </div>
             <div class="results-list">
               <div 
                 v-for="(result, idx) in surveyResults" 
@@ -456,6 +485,12 @@ const surveyResults = ref([])
 const isSurveying = ref(false)
 const SURVEY_BATCH_SIZE = 5
 const INTERVIEW_PLATFORM = 'reddit'
+const SURVEY_STOPWORDS = new Set([
+  'para', 'porque', 'como', 'pero', 'este', 'esta', 'estos', 'estas', 'tienen',
+  'tiene', 'sobre', 'desde', 'donde', 'cuando', 'cual', 'cuales', 'que', 'con',
+  'una', 'uno', 'los', 'las', 'del', 'por', 'sus', 'son', 'ser', 'mas', 'muy',
+  'sin', 'hay', 'debe', 'deben', 'puede', 'pueden', 'negocio', 'negocios'
+])
 
 // Report Data
 const reportOutline = ref(null)
@@ -464,6 +499,57 @@ const collapsedSections = ref(new Set())
 const currentSectionIndex = ref(null)
 const profiles = ref([])
 const answeredSurveyCount = computed(() => surveyResults.value.filter(result => result.answered).length)
+const surveyAnalysis = computed(() => {
+  const answered = surveyResults.value.filter(result => result.answered && result.answer)
+  const responseRate = surveyResults.value.length
+    ? Math.round((answered.length / surveyResults.value.length) * 100)
+    : 0
+
+  const counts = new Map()
+  const confidenceCounts = { alta: 0, media: 0, baja: 0 }
+
+  for (const result of answered) {
+    const text = String(result.answer || '').toLowerCase()
+    if (text.includes('confianza: alta')) confidenceCounts.alta += 1
+    if (text.includes('confianza: media')) confidenceCounts.media += 1
+    if (text.includes('confianza: baja')) confidenceCounts.baja += 1
+
+    const words = text
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9ñ\s]/gi, ' ')
+      .split(/\s+/)
+      .filter(word => word.length >= 5 && !SURVEY_STOPWORDS.has(word))
+
+    for (const word of words) {
+      counts.set(word, (counts.get(word) || 0) + 1)
+    }
+  }
+
+  const keywords = Array.from(counts.entries())
+    .map(([word, count]) => ({ word, count }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 8)
+
+  const maxCount = Math.max(...keywords.map(item => item.count), 1)
+  const keywordsWithPercent = keywords.map(item => ({
+    ...item,
+    percent: Math.max(8, Math.round((item.count / maxCount) * 100))
+  }))
+
+  const confidenceLabel = Object.entries(confidenceCounts)
+    .sort((a, b) => b[1] - a[1])[0]
+  const confidence = confidenceLabel && confidenceLabel[1] > 0
+    ? confidenceLabel[0]
+    : (responseRate >= 70 ? 'media' : 'baja')
+
+  return {
+    responseRate,
+    confidenceLabel: confidence,
+    topSignal: keywordsWithPercent[0]?.word || '',
+    keywords: keywordsWithPercent
+  }
+})
 
 // Helper Methods
 const isSectionCompleted = (sectionIndex) => {
@@ -869,35 +955,54 @@ const submitSurvey = async () => {
       const batch = batches[batchIndex]
       addLog(`Procesando lote ${batchIndex + 1}/${batches.length} (${batch.length} destinatarios)`)
 
-      const res = await interviewAgents({
-        simulation_id: props.simulationId,
-        platform: INTERVIEW_PLATFORM,
-        timeout: Math.max(180, batch.length * 45),
-        interviews: batch
-      })
-
-      if (!res.success || !res.data) {
-        throw new Error(res.error || 'Solicitud fallida')
-      }
-
-      const resultData = res.data.result || res.data
-      const resultsDict = resultData.results || resultData
-
-      for (const interview of batch) {
-        const agentIdx = interview.agent_id
-        const agent = profiles.value[agentIdx]
-        const extracted = extractAgentResponse(resultsDict, agentIdx)
-
-        surveyResultsList.push({
-          agent_id: agentIdx,
-          agent_name: agent?.username || `Agent ${agentIdx}`,
-          profession: agent?.profession,
-          question: surveyQuestion.value.trim(),
-          answer: extracted.answer || `Sin respuesta${extracted.error ? `: ${extracted.error}` : ''}`,
-          platform: extracted.platform || INTERVIEW_PLATFORM,
-          answered: Boolean(extracted.answer)
+      try {
+        const res = await interviewAgents({
+          simulation_id: props.simulationId,
+          platform: INTERVIEW_PLATFORM,
+          timeout: Math.max(180, batch.length * 45),
+          interviews: batch
         })
+
+        if (!res.success || !res.data) {
+          throw new Error(res.error || 'Solicitud fallida')
+        }
+
+        const resultData = res.data.result || res.data
+        const resultsDict = resultData.results || resultData
+
+        for (const interview of batch) {
+          const agentIdx = interview.agent_id
+          const agent = profiles.value[agentIdx]
+          const extracted = extractAgentResponse(resultsDict, agentIdx)
+
+          surveyResultsList.push({
+            agent_id: agentIdx,
+            agent_name: agent?.username || `Agent ${agentIdx}`,
+            profession: agent?.profession,
+            question: surveyQuestion.value.trim(),
+            answer: extracted.answer || `Sin respuesta${extracted.error ? `: ${extracted.error}` : ''}`,
+            platform: extracted.platform || INTERVIEW_PLATFORM,
+            answered: Boolean(extracted.answer)
+          })
+        }
+      } catch (batchError) {
+        addLog(`Lote ${batchIndex + 1} falló: ${batchError.message}`)
+        for (const interview of batch) {
+          const agentIdx = interview.agent_id
+          const agent = profiles.value[agentIdx]
+          surveyResultsList.push({
+            agent_id: agentIdx,
+            agent_name: agent?.username || `Agent ${agentIdx}`,
+            profession: agent?.profession,
+            question: surveyQuestion.value.trim(),
+            answer: `Sin respuesta: ${batchError.message}`,
+            platform: INTERVIEW_PLATFORM,
+            answered: false
+          })
+        }
       }
+
+      surveyResults.value = [...surveyResultsList]
     }
 
     surveyResults.value = surveyResultsList
@@ -925,6 +1030,14 @@ const downloadSurveyResults = () => {
   txt += `${sep}\n\n`
   txt += `Fecha: ${dateStr}  ${timeStr}\n`
   txt += `Total de respuestas: ${surveyResults.value.length}\n\n`
+  txt += `Respuestas reales: ${answeredSurveyCount.value}/${surveyResults.value.length}\n`
+  txt += `Tasa de respuesta: ${surveyAnalysis.value.responseRate}%\n`
+  txt += `Confianza promedio: ${surveyAnalysis.value.confidenceLabel}\n`
+  txt += `Señal dominante: ${surveyAnalysis.value.topSignal || 'Sin señal'}\n`
+  if (surveyAnalysis.value.keywords.length) {
+    txt += `Temas frecuentes: ${surveyAnalysis.value.keywords.map(item => `${item.word} (${item.count})`).join(', ')}\n`
+  }
+  txt += `\n`
   txt += `${divider}\n`
   txt += `PREGUNTA DE LA ENCUESTA\n`
   txt += `${divider}\n`
@@ -2531,6 +2644,84 @@ watch(() => props.simulationId, (newId) => {
 .download-survey-btn:hover {
   background: #E5E7EB;
   border-color: #D1D5DB;
+}
+
+.survey-analysis-card {
+  background: #FFFFFF;
+  border: 1px solid #E5E7EB;
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 18px;
+}
+
+.analysis-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.analysis-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.metric-label {
+  font-size: 11px;
+  color: #9CA3AF;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.analysis-metric strong {
+  font-size: 18px;
+  color: #111827;
+  overflow-wrap: anywhere;
+}
+
+.keyword-chart {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.keyword-row {
+  display: grid;
+  grid-template-columns: 110px 1fr 32px;
+  align-items: center;
+  gap: 10px;
+}
+
+.keyword-label,
+.keyword-count {
+  font-size: 12px;
+  color: #6B7280;
+}
+
+.keyword-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.keyword-count {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.keyword-bar-track {
+  height: 8px;
+  background: #EEF2F7;
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.keyword-bar {
+  height: 100%;
+  background: #10B981;
+  border-radius: inherit;
 }
 
 .results-list {

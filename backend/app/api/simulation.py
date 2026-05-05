@@ -4,7 +4,10 @@ Paso 2: Lectura y filtrado de entidades Zep, preparación y ejecución de la sim
 """
 
 import os
+import json
 import traceback
+from datetime import datetime
+from typing import Any, Dict
 from flask import request, jsonify, send_file
 
 from . import simulation_bp
@@ -13,6 +16,7 @@ from ..services.zep_entity_reader import ZepEntityReader
 from ..services.oasis_profile_generator import OasisProfileGenerator
 from ..services.simulation_manager import SimulationManager, SimulationStatus
 from ..services.simulation_runner import SimulationRunner, RunnerStatus
+from ..utils.llm_client import LLMClient
 from ..utils.logger import get_logger
 from ..models.project import ProjectManager
 
@@ -25,6 +29,8 @@ INTERVIEW_PROMPT_PREFIX = "Considerando tu personaje, todos tus recuerdos y acci
 MAX_INTERVIEW_BATCH_SIZE = int(os.environ.get("MAX_INTERVIEW_BATCH_SIZE", "60"))
 MAX_INTERVIEW_PROMPT_CHARS = int(os.environ.get("MAX_INTERVIEW_PROMPT_CHARS", "4000"))
 MAX_INTERVIEW_TIMEOUT_SECONDS = int(os.environ.get("MAX_INTERVIEW_TIMEOUT_SECONDS", "600"))
+INTERVIEW_FALLBACK_MAX_ACTIONS = int(os.environ.get("INTERVIEW_FALLBACK_MAX_ACTIONS", "12"))
+INTERVIEW_FALLBACK_MAX_TOKENS = int(os.environ.get("INTERVIEW_FALLBACK_MAX_TOKENS", "700"))
 
 
 def optimize_interview_prompt(prompt: str) -> str:
@@ -60,6 +66,148 @@ def mark_simulation_running(state):
     state.current_round = 0
     state.twitter_status = "running" if state.enable_twitter else "disabled"
     state.reddit_status = "running" if state.enable_reddit else "disabled"
+
+
+def _select_interview_platform(manager: SimulationManager, simulation_id: str, platform: str = None) -> str:
+    """Elegir una plataforma con perfiles disponibles para entrevistas fallback."""
+    if platform in ("twitter", "reddit"):
+        return platform
+    try:
+        if manager.get_profiles(simulation_id, "reddit"):
+            return "reddit"
+    except Exception:
+        pass
+    return "twitter"
+
+
+def _get_agent_profile(manager: SimulationManager, simulation_id: str, platform: str, agent_id: int):
+    """Obtener perfil por user_id/agent_id o por indice de lista."""
+    profiles = manager.get_profiles(simulation_id, platform)
+    for idx, profile in enumerate(profiles):
+        profile_id = profile.get("user_id", profile.get("agent_id", idx))
+        try:
+            if int(profile_id) == int(agent_id):
+                return profile, idx
+        except (TypeError, ValueError):
+            pass
+    if 0 <= int(agent_id) < len(profiles):
+        return profiles[int(agent_id)], int(agent_id)
+    raise ValueError(f"No se encontró el agente {agent_id} en perfiles {platform}")
+
+
+def _compact_action(action) -> str:
+    args = action.action_args if isinstance(action.action_args, dict) else {}
+    args_text = json.dumps(args, ensure_ascii=False)
+    if len(args_text) > 320:
+        args_text = args_text[:320] + "..."
+    return (
+        f"R{action.round_num} {action.platform} {action.action_type}: "
+        f"{args_text}"
+    )
+
+
+def _build_fallback_context(simulation_id: str, platform: str, agent_id: int) -> str:
+    run_state = SimulationRunner.get_run_state(simulation_id)
+    actions = SimulationRunner.get_actions(
+        simulation_id=simulation_id,
+        platform=platform,
+        agent_id=agent_id,
+        limit=INTERVIEW_FALLBACK_MAX_ACTIONS,
+    )
+    actions = list(reversed(actions))
+    action_lines = [_compact_action(action) for action in actions]
+
+    if run_state:
+        total_actions = getattr(run_state, "total_actions_count", None)
+        if total_actions is None:
+            total_actions = (
+                getattr(run_state, "twitter_actions_count", 0)
+                + getattr(run_state, "reddit_actions_count", 0)
+            )
+        state_line = (
+            f"Estado runtime: {run_state.runner_status.value}; "
+            f"ronda global {run_state.current_round}/{run_state.total_rounds}; "
+            f"acciones totales {total_actions}."
+        )
+        if run_state.error:
+            state_line += " La simulación terminó parcial o con error; declara baja confianza si aplica."
+    else:
+        state_line = "Estado runtime no disponible."
+
+    if not action_lines:
+        action_lines = ["No hay acciones registradas para este agente en esta plataforma."]
+
+    return state_line + "\nAcciones recientes:\n" + "\n".join(action_lines)
+
+
+def _fallback_interview_agent(
+    manager: SimulationManager,
+    simulation_id: str,
+    agent_id: int,
+    prompt: str,
+    platform: str = None,
+) -> Dict[str, Any]:
+    """Responder una entrevista sin entorno OASIS vivo, usando perfil y logs persistidos."""
+    selected_platform = _select_interview_platform(manager, simulation_id, platform)
+    profile, profile_index = _get_agent_profile(manager, simulation_id, selected_platform, int(agent_id))
+    context = _build_fallback_context(simulation_id, selected_platform, int(agent_id))
+
+    profile_summary = {
+        "user_id": profile.get("user_id", profile_index),
+        "username": profile.get("username"),
+        "name": profile.get("name"),
+        "profession": profile.get("profession"),
+        "bio": profile.get("bio"),
+        "persona": profile.get("persona", "")[:1800],
+    }
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Eres un individuo simulado dentro de MiroFish. Responde en primera persona, "
+                "en español claro, usando solo el perfil y las acciones registradas. "
+                "No digas que eres un modelo de IA. Si la simulación está parcial o fallida, "
+                "responde con prudencia y baja confianza, sin inventar datos."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Perfil del agente:\n{json.dumps(profile_summary, ensure_ascii=False, indent=2)}\n\n"
+                f"Contexto de simulación:\n{context}\n\n"
+                f"Pregunta:\n{prompt}\n\n"
+                "Entrega una respuesta útil de 2 a 5 párrafos. Si aplica, agrega una línea final "
+                "con 'Confianza:' alta, media o baja."
+            ),
+        },
+    ]
+
+    try:
+        response = LLMClient().chat(
+            messages=messages,
+            temperature=0.55,
+            max_tokens=INTERVIEW_FALLBACK_MAX_TOKENS,
+        )
+    except Exception as e:
+        logger.warning(f"Fallback LLM de entrevista falló: simulation={simulation_id}, agent={agent_id}, error={e}")
+        response = (
+            f"Desde mi perfil como {profile.get('username', f'Agent {agent_id}')}, "
+            f"puedo responder de forma limitada porque el entorno interactivo de la simulación ya no está activo. "
+            f"Con la información disponible, mi postura se basa en mi perfil y en las acciones registradas, "
+            f"no en una conversación viva.\n\nConfianza: baja."
+        )
+
+    return {
+        "agent_id": int(agent_id),
+        "profile_index": profile_index,
+        "agent_name": profile.get("username") or profile.get("name") or f"Agent {agent_id}",
+        "prompt": prompt,
+        "response": response,
+        "platform": selected_platform,
+        "timestamp": datetime.now().isoformat(),
+        "fallback_mode": True,
+    }
 
 
 # ============== Interfaces de lectura de entidades ==============
@@ -2310,12 +2458,27 @@ def interview_agent():
                 "error": "El parámetro platform solo puede ser 'twitter' o 'reddit'"
             }), 400
         
-        # Verificar el estado del entorno
+        manager = SimulationManager()
+
+        # Si el entorno OASIS no está vivo, responder desde perfiles/logs persistidos.
         if not SimulationRunner.check_env_alive(simulation_id):
+            fallback_result = _fallback_interview_agent(
+                manager=manager,
+                simulation_id=simulation_id,
+                agent_id=int(agent_id),
+                prompt=str(prompt).strip(),
+                platform=platform,
+            )
             return jsonify({
-                "success": False,
-                "error": "El entorno de simulación no está en ejecución o está cerrado. Asegúrese de que la simulación haya completado y esté en modo de espera de comandos."
-            }), 400
+                "success": True,
+                "data": {
+                    "agent_id": int(agent_id),
+                    "prompt": prompt,
+                    "result": fallback_result,
+                    "timestamp": datetime.now().isoformat(),
+                    "fallback_mode": True,
+                }
+            })
         
         # Optimizar prompt, agregar prefijo para evitar que el Agent llame a herramientas
         optimized_prompt = optimize_interview_prompt(prompt)
@@ -2492,12 +2655,48 @@ def interview_agents_batch():
                 sanitized["platform"] = item_platform
             sanitized_interviews.append(sanitized)
 
-        # Verificar el estado del entorno
+        manager = SimulationManager()
+
+        # Si el entorno OASIS no está vivo, responder desde perfiles/logs persistidos.
         if not SimulationRunner.check_env_alive(simulation_id):
+            selected_platform = _select_interview_platform(manager, simulation_id, platform)
+            results = {}
+            for interview in sanitized_interviews:
+                item_platform = interview.get("platform") or selected_platform
+                agent_id = interview["agent_id"]
+                try:
+                    fallback_result = _fallback_interview_agent(
+                        manager=manager,
+                        simulation_id=simulation_id,
+                        agent_id=agent_id,
+                        prompt=interview["prompt"],
+                        platform=item_platform,
+                    )
+                except Exception as e:
+                    fallback_result = {
+                        "agent_id": agent_id,
+                        "prompt": interview["prompt"],
+                        "response": "",
+                        "error": str(e),
+                        "platform": item_platform,
+                        "timestamp": datetime.now().isoformat(),
+                        "fallback_mode": True,
+                    }
+                results[f"{item_platform}_{agent_id}"] = fallback_result
+
             return jsonify({
-                "success": False,
-                "error": "El entorno de simulación no está en ejecución o está cerrado. Asegúrese de que la simulación haya completado y esté en modo de espera de comandos."
-            }), 400
+                "success": True,
+                "data": {
+                    "interviews_count": len(sanitized_interviews),
+                    "result": {
+                        "interviews_count": len(results),
+                        "results": results,
+                        "fallback_mode": True,
+                    },
+                    "timestamp": datetime.now().isoformat(),
+                    "fallback_mode": True,
+                }
+            })
 
         # Optimizar el prompt de cada ítem de entrevista, agregar prefijo para evitar que el Agent llame a herramientas
         optimized_interviews = []
@@ -2599,12 +2798,49 @@ def interview_all_agents():
                 "error": "El parámetro platform solo puede ser 'twitter' o 'reddit'"
             }), 400
 
-        # Verificar el estado del entorno
+        manager = SimulationManager()
+
+        # Si el entorno OASIS no está vivo, responder desde perfiles/logs persistidos.
         if not SimulationRunner.check_env_alive(simulation_id):
+            selected_platform = _select_interview_platform(manager, simulation_id, platform)
+            profiles = manager.get_profiles(simulation_id, selected_platform)
+            limited_profiles = profiles[:MAX_INTERVIEW_BATCH_SIZE]
+            results = {}
+            for idx, profile in enumerate(limited_profiles):
+                agent_id = int(profile.get("user_id", profile.get("agent_id", idx)))
+                try:
+                    fallback_result = _fallback_interview_agent(
+                        manager=manager,
+                        simulation_id=simulation_id,
+                        agent_id=agent_id,
+                        prompt=str(prompt).strip(),
+                        platform=selected_platform,
+                    )
+                except Exception as e:
+                    fallback_result = {
+                        "agent_id": agent_id,
+                        "prompt": str(prompt).strip(),
+                        "response": "",
+                        "error": str(e),
+                        "platform": selected_platform,
+                        "timestamp": datetime.now().isoformat(),
+                        "fallback_mode": True,
+                    }
+                results[f"{selected_platform}_{agent_id}"] = fallback_result
+
             return jsonify({
-                "success": False,
-                "error": "El entorno de simulación no está en ejecución o está cerrado. Asegúrese de que la simulación haya completado y esté en modo de espera de comandos."
-            }), 400
+                "success": True,
+                "data": {
+                    "interviews_count": len(results),
+                    "result": {
+                        "interviews_count": len(results),
+                        "results": results,
+                        "fallback_mode": True,
+                    },
+                    "timestamp": datetime.now().isoformat(),
+                    "fallback_mode": True,
+                }
+            })
 
         # Optimizar prompt, agregar prefijo para evitar que el Agent llame a herramientas
         optimized_prompt = optimize_interview_prompt(prompt)
