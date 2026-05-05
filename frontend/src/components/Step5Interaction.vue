@@ -16,10 +16,10 @@
             <div class="report-export-actions">
               <button class="report-export-btn primary" @click="downloadFutureProfessorAnalysis" :disabled="isAnalyzingReport">
                 <span v-if="isAnalyzingReport" class="loading-spinner small"></span>
-                <span v-else>Profesor Futuro</span>
+                <span v-else>PDF Profesor Futuro</span>
               </button>
               <button class="report-export-btn" @click="downloadPredictionReport">
-                Descargar informe
+                PDF Ejecutivo
               </button>
               <button class="report-export-btn" @click="downloadReportDataJson">
                 Datos JSON
@@ -1327,8 +1327,8 @@ const downloadPredictionReport = () => {
   if (!props.reportId) return
 
   const a = document.createElement('a')
-  a.href = `/api/report/${props.reportId}/download?format=md`
-  a.download = `${props.reportId}.md`
+  a.href = `/api/report/${props.reportId}/download?format=pdf`
+  a.download = `${props.reportId}.pdf`
   document.body.appendChild(a)
   a.click()
   document.body.removeChild(a)
@@ -1359,11 +1359,12 @@ const downloadFutureProfessorAnalysis = async () => {
     }
 
     const now = new Date()
-    downloadFile(
-      res.data.analysis_markdown,
-      `profesor_futuro_${props.reportId}_${now.toISOString().slice(0, 10)}.md`,
-      'text/markdown;charset=utf-8'
-    )
+    const a = document.createElement('a')
+    a.href = `/api/report/${props.reportId}/future-analysis/download?format=pdf`
+    a.download = `profesor_futuro_${props.reportId}_${now.toISOString().slice(0, 10)}.pdf`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
     addLog(`Análisis Profesor Futuro descargado${res.data.cached ? ' desde caché' : ''}`)
   } catch (err) {
     addLog(`Error en Profesor Futuro: ${err.message}`)

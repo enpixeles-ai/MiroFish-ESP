@@ -4,11 +4,14 @@ Provee interfaces para generación, obtención y conversación de reportes de si
 """
 
 import json
+import io
 import os
+import re
 import traceback
 import threading
 from datetime import datetime
 from flask import request, jsonify, send_file
+import fitz
 
 from . import report_bp
 from ..config import Config
@@ -23,6 +26,9 @@ logger = get_logger('mirofish.api.report')
 
 FUTURE_ANALYSIS_MAX_REPORT_CHARS = int(os.environ.get("FUTURE_ANALYSIS_MAX_REPORT_CHARS", "42000"))
 FUTURE_ANALYSIS_MAX_TOKENS = int(os.environ.get("FUTURE_ANALYSIS_MAX_TOKENS", "2400"))
+PDF_PAGE_WIDTH = 612
+PDF_PAGE_HEIGHT = 792
+PDF_MARGIN = 54
 
 
 def _get_future_analysis_paths(report_id: str):
@@ -66,6 +72,217 @@ def _strip_markdown_fence(text: str) -> str:
     if lines and lines[-1].strip() == "```":
         lines = lines[:-1]
     return "\n".join(lines).strip()
+
+
+def _clean_markdown_inline(text: str) -> str:
+    text = re.sub(r'!\[([^\]]*)\]\([^)]+\)', r'\1', text or "")
+    text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
+    text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)
+    text = re.sub(r'__([^_]+)__', r'\1', text)
+    text = re.sub(r'[*_`]+', '', text)
+    text = re.sub(r'<[^>]+>', '', text)
+    return text.strip()
+
+
+def _markdown_blocks(markdown_text: str):
+    text = _strip_markdown_fence(markdown_text)
+    blocks = []
+    paragraph = []
+    in_code = False
+
+    def flush_paragraph():
+        nonlocal paragraph
+        if paragraph:
+            blocks.append({"type": "paragraph", "text": _clean_markdown_inline(" ".join(paragraph))})
+            paragraph = []
+
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip()
+        stripped = line.strip()
+
+        if stripped.startswith("```"):
+            flush_paragraph()
+            in_code = not in_code
+            continue
+
+        if in_code:
+            if stripped:
+                blocks.append({"type": "code", "text": stripped})
+            continue
+
+        if not stripped:
+            flush_paragraph()
+            continue
+
+        if re.fullmatch(r'[\s|:\-]+', stripped) and "|" in stripped:
+            continue
+
+        heading = re.match(r'^(#{1,4})\s+(.+)$', stripped)
+        if heading:
+            flush_paragraph()
+            blocks.append({
+                "type": f"h{len(heading.group(1))}",
+                "text": _clean_markdown_inline(heading.group(2))
+            })
+            continue
+
+        bullet = re.match(r'^[-*]\s+(.+)$', stripped)
+        numbered = re.match(r'^\d+[.)]\s+(.+)$', stripped)
+        if bullet or numbered:
+            flush_paragraph()
+            blocks.append({"type": "bullet", "text": _clean_markdown_inline((bullet or numbered).group(1))})
+            continue
+
+        if stripped.startswith(">"):
+            flush_paragraph()
+            blocks.append({"type": "quote", "text": _clean_markdown_inline(stripped.lstrip("> ").strip())})
+            continue
+
+        if "|" in stripped and stripped.count("|") >= 2:
+            flush_paragraph()
+            cells = [_clean_markdown_inline(cell) for cell in stripped.strip("|").split("|")]
+            cells = [cell for cell in cells if cell]
+            if cells:
+                blocks.append({"type": "table_row", "text": " | ".join(cells)})
+            continue
+
+        paragraph.append(stripped)
+
+    flush_paragraph()
+    return [block for block in blocks if block.get("text")]
+
+
+def _text_width(text: str, fontsize: float, fontname: str = "helv") -> float:
+    try:
+        return fitz.get_text_length(text, fontname=fontname, fontsize=fontsize)
+    except Exception:
+        return len(text) * fontsize * 0.52
+
+
+def _wrap_pdf_text(text: str, width: float, fontsize: float, fontname: str = "helv"):
+    words = (text or "").split()
+    lines = []
+    current = ""
+
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        if not current or _text_width(candidate, fontsize, fontname) <= width:
+            current = candidate
+        else:
+            lines.append(current)
+            current = word
+
+    if current:
+        lines.append(current)
+    return lines or [""]
+
+
+def _report_pdf_bytes(report, markdown_text: str, document_label: str) -> bytes:
+    doc = fitz.open()
+    content_width = PDF_PAGE_WIDTH - (PDF_MARGIN * 2)
+    bottom_limit = PDF_PAGE_HEIGHT - 64
+    title = report.outline.title if report.outline else document_label
+    subtitle = report.outline.summary if report.outline else report.simulation_requirement
+    accent = (0.06, 0.09, 0.16)
+    muted = (0.42, 0.46, 0.54)
+    light = (0.90, 0.92, 0.95)
+    green = (0.03, 0.55, 0.38)
+
+    def new_page():
+        page = doc.new_page(width=PDF_PAGE_WIDTH, height=PDF_PAGE_HEIGHT)
+        page.insert_text((PDF_MARGIN, 30), document_label.upper(), fontsize=8, fontname="helv", color=muted)
+        page.insert_text((PDF_PAGE_WIDTH - PDF_MARGIN - 145, 30), report.report_id, fontsize=8, fontname="helv", color=muted)
+        page.draw_line((PDF_MARGIN, 42), (PDF_PAGE_WIDTH - PDF_MARGIN, 42), color=light, width=0.7)
+        return page, 68
+
+    page, y = new_page()
+    page.draw_rect(fitz.Rect(PDF_MARGIN, y, PDF_MARGIN + 96, y + 18), fill=accent, color=accent)
+    page.insert_text((PDF_MARGIN + 8, y + 13), "MIROFISH", fontsize=8, fontname="hebo", color=(1, 1, 1))
+    y += 42
+
+    for line in _wrap_pdf_text(title, content_width, 24, "hebo"):
+        page.insert_text((PDF_MARGIN, y), line, fontsize=24, fontname="hebo", color=accent)
+        y += 30
+    y += 8
+
+    for line in _wrap_pdf_text(subtitle or "", content_width, 11, "helv"):
+        page.insert_text((PDF_MARGIN, y), line, fontsize=11, fontname="helv", color=muted)
+        y += 16
+    y += 18
+
+    meta = [
+        ("Reporte", report.report_id),
+        ("Simulación", report.simulation_id),
+        ("Grafo", report.graph_id),
+        ("Generado", datetime.now().strftime("%Y-%m-%d %H:%M")),
+    ]
+    box = fitz.Rect(PDF_MARGIN, y, PDF_PAGE_WIDTH - PDF_MARGIN, y + 72)
+    page.draw_rect(box, fill=(0.97, 0.98, 0.99), color=light)
+    meta_y = y + 18
+    for idx, (label, value) in enumerate(meta):
+        col_x = PDF_MARGIN + 14 + (idx % 2) * (content_width / 2)
+        if idx == 2:
+            meta_y += 30
+        page.insert_text((col_x, meta_y), label.upper(), fontsize=7, fontname="hebo", color=muted)
+        page.insert_text((col_x + 62, meta_y), str(value or ""), fontsize=8.5, fontname="helv", color=accent)
+    y += 100
+
+    def ensure_space(required_height):
+        nonlocal page, y
+        if y + required_height > bottom_limit:
+            page, y = new_page()
+
+    def draw_wrapped(text, x, width, fontsize=10, fontname="helv", color=(0.13, 0.17, 0.24), line_height=None, prefix=""):
+        nonlocal page, y
+        line_height = line_height or fontsize * 1.45
+        lines = _wrap_pdf_text(text, width, fontsize, fontname)
+        for idx, line in enumerate(lines):
+            ensure_space(line_height + 6)
+            page.insert_text((x, y), f"{prefix if idx == 0 else ''}{line}", fontsize=fontsize, fontname=fontname, color=color)
+            y += line_height
+
+    for block in _markdown_blocks(markdown_text):
+        kind = block["type"]
+        text = block["text"]
+
+        if kind == "h1":
+            ensure_space(44)
+            y += 10
+            draw_wrapped(text, PDF_MARGIN, content_width, fontsize=17, fontname="hebo", color=accent, line_height=23)
+            page.draw_line((PDF_MARGIN, y - 8), (PDF_PAGE_WIDTH - PDF_MARGIN, y - 8), color=light, width=0.6)
+            y += 10
+        elif kind in ("h2", "h3", "h4"):
+            ensure_space(34)
+            y += 8
+            draw_wrapped(text, PDF_MARGIN, content_width, fontsize=13, fontname="hebo", color=accent, line_height=18)
+            y += 4
+        elif kind == "bullet":
+            draw_wrapped(text, PDF_MARGIN + 16, content_width - 16, fontsize=9.7, line_height=14, prefix="• ")
+            y += 3
+        elif kind == "quote":
+            ensure_space(40)
+            start_y = y - 2
+            draw_wrapped(text, PDF_MARGIN + 16, content_width - 24, fontsize=9.5, color=muted, line_height=14)
+            page.draw_rect(fitz.Rect(PDF_MARGIN, start_y, PDF_MARGIN + 4, y - 5), fill=green, color=green)
+            y += 8
+        elif kind == "table_row":
+            ensure_space(28)
+            page.draw_rect(fitz.Rect(PDF_MARGIN, y - 10, PDF_PAGE_WIDTH - PDF_MARGIN, y + 10), fill=(0.98, 0.99, 1.0), color=light)
+            draw_wrapped(text, PDF_MARGIN + 8, content_width - 16, fontsize=8.5, fontname="helv", color=accent, line_height=12)
+            y += 5
+        elif kind == "code":
+            draw_wrapped(text, PDF_MARGIN + 8, content_width - 16, fontsize=8.2, fontname="cour", color=(0.20, 0.24, 0.31), line_height=12)
+            y += 3
+        else:
+            draw_wrapped(text, PDF_MARGIN, content_width, fontsize=10, line_height=14.8)
+            y += 8
+
+    for idx, page in enumerate(doc, start=1):
+        page.draw_line((PDF_MARGIN, PDF_PAGE_HEIGHT - 42), (PDF_PAGE_WIDTH - PDF_MARGIN, PDF_PAGE_HEIGHT - 42), color=light, width=0.5)
+        page.insert_text((PDF_MARGIN, PDF_PAGE_HEIGHT - 25), "EnPíxeles Lab / ProVisión", fontsize=8, fontname="helv", color=muted)
+        page.insert_text((PDF_PAGE_WIDTH - PDF_MARGIN - 45, PDF_PAGE_HEIGHT - 25), f"{idx}/{len(doc)}", fontsize=8, fontname="helv", color=muted)
+
+    return doc.tobytes(garbage=4, deflate=True)
 
 
 def _generate_future_analysis(report, force: bool = False):
@@ -543,6 +760,19 @@ def download_report(report_id: str):
             }), 404
 
         fmt = request.args.get('format', 'md').lower()
+        if fmt == 'pdf':
+            pdf_data = _report_pdf_bytes(
+                report=report,
+                markdown_text=report.markdown_content or "",
+                document_label="PDF Ejecutivo MiroFish"
+            )
+            return send_file(
+                io.BytesIO(pdf_data),
+                as_attachment=True,
+                download_name=f"{report_id}.pdf",
+                mimetype='application/pdf'
+            )
+
         is_txt = fmt == 'txt'
         ext = 'txt' if is_txt else 'md'
         mimetype = 'text/plain'
@@ -609,6 +839,58 @@ def generate_future_analysis(report_id: str):
 
     except Exception as e:
         logger.error(f"Error al generar análisis Profesor Futuro: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+
+
+@report_bp.route('/<report_id>/future-analysis/download', methods=['GET'])
+def download_future_analysis(report_id: str):
+    """Descargar análisis Profesor Futuro como PDF, Markdown o JSON."""
+    try:
+        report = ReportManager.get_report(report_id)
+        if not report:
+            return jsonify({
+                "success": False,
+                "error": f"El reporte no existe: {report_id}"
+            }), 404
+
+        fmt = request.args.get('format', 'pdf').lower()
+        force = request.args.get('force', 'false').lower() == 'true'
+        analysis_markdown, payload, _cached = _generate_future_analysis(report, force=force)
+
+        if fmt == 'json':
+            return send_file(
+                io.BytesIO(json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')),
+                as_attachment=True,
+                download_name=f"profesor_futuro_{report_id}.json",
+                mimetype='application/json'
+            )
+
+        if fmt in ('md', 'markdown'):
+            return send_file(
+                io.BytesIO(analysis_markdown.encode('utf-8')),
+                as_attachment=True,
+                download_name=f"profesor_futuro_{report_id}.md",
+                mimetype='text/markdown'
+            )
+
+        pdf_data = _report_pdf_bytes(
+            report=report,
+            markdown_text=analysis_markdown,
+            document_label="Profesor Futuro"
+        )
+        return send_file(
+            io.BytesIO(pdf_data),
+            as_attachment=True,
+            download_name=f"profesor_futuro_{report_id}.pdf",
+            mimetype='application/pdf'
+        )
+
+    except Exception as e:
+        logger.error(f"Error al descargar análisis Profesor Futuro: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e),
