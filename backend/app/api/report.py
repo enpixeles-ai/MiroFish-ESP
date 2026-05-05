@@ -3,9 +3,11 @@ Rutas de API de reportes
 Provee interfaces para generación, obtención y conversación de reportes de simulación
 """
 
+import json
 import os
 import traceback
 import threading
+from datetime import datetime
 from flask import request, jsonify, send_file
 
 from . import report_bp
@@ -14,9 +16,140 @@ from ..services.report_agent import ReportAgent, ReportManager, ReportStatus
 from ..services.simulation_manager import SimulationManager
 from ..models.project import ProjectManager
 from ..models.task import TaskManager, TaskStatus
+from ..utils.llm_client import LLMClient
 from ..utils.logger import get_logger
 
 logger = get_logger('mirofish.api.report')
+
+FUTURE_ANALYSIS_MAX_REPORT_CHARS = int(os.environ.get("FUTURE_ANALYSIS_MAX_REPORT_CHARS", "42000"))
+FUTURE_ANALYSIS_MAX_TOKENS = int(os.environ.get("FUTURE_ANALYSIS_MAX_TOKENS", "2400"))
+
+
+def _get_future_analysis_paths(report_id: str):
+    folder = ReportManager._ensure_report_folder(report_id)
+    return (
+        os.path.join(folder, "profesor_futuro_analysis.md"),
+        os.path.join(folder, "profesor_futuro_analysis.json"),
+    )
+
+
+def _fallback_future_analysis(report) -> str:
+    title = report.outline.title if report.outline else "Informe de predicción"
+    summary = report.outline.summary if report.outline else ""
+    return (
+        f"# Análisis Profesor Futuro — {title}\n\n"
+        f"Reporte ID: `{report.report_id}`\n\n"
+        f"Simulación ID: `{report.simulation_id}`\n\n"
+        "## Lectura ejecutiva\n\n"
+        f"{summary or 'El reporte está disponible, pero no se pudo generar un análisis enriquecido automático.'}\n\n"
+        "## Preguntas base para análisis profundo\n\n"
+        "- ¿Qué decisión de negocio se quiere tomar con esta predicción?\n"
+        "- ¿Qué patrones se repiten entre la simulación, el grafo y el informe?\n"
+        "- ¿Qué señales tienen impacto económico inmediato?\n"
+        "- ¿Qué incertidumbres deben validarse antes de ejecutar?\n\n"
+        "## Prompt sugerido para otro LLM\n\n"
+        "Analiza el reporte completo como futurista estratégico, investigador de mercado y operador de negocio. "
+        "Extrae patrones, oportunidades, riesgos, señales débiles, hipótesis de demanda, métricas a observar y próximos experimentos. "
+        "Separa hechos del reporte, inferencias y recomendaciones.\n\n"
+        "Confianza: baja, porque se usó un resumen fallback sin razonamiento LLM enriquecido.\n"
+    )
+
+
+def _strip_markdown_fence(text: str) -> str:
+    cleaned = (text or "").strip()
+    if not cleaned.startswith("```"):
+        return cleaned
+
+    lines = cleaned.splitlines()
+    if lines and lines[0].strip().startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
+
+
+def _generate_future_analysis(report, force: bool = False):
+    md_path, json_path = _get_future_analysis_paths(report.report_id)
+
+    if not force and os.path.exists(md_path):
+        with open(md_path, 'r', encoding='utf-8') as f:
+            cached_markdown = _strip_markdown_fence(f.read())
+        cached_payload = {}
+        if os.path.exists(json_path):
+            with open(json_path, 'r', encoding='utf-8') as f:
+                cached_payload = json.load(f)
+            cached_payload["analysis_markdown"] = cached_markdown
+        return cached_markdown, cached_payload, True
+
+    report_markdown = report.markdown_content or ""
+    if len(report_markdown) > FUTURE_ANALYSIS_MAX_REPORT_CHARS:
+        report_markdown = report_markdown[:FUTURE_ANALYSIS_MAX_REPORT_CHARS] + "\n\n[Contenido truncado para análisis automático]"
+
+    outline = report.outline.to_dict() if report.outline else None
+    prompt = (
+        "Eres Profesor Futuro, un analista estratégico de predicción para negocios. "
+        "Tu trabajo es leer un informe generado por MiroFish y convertirlo en un paquete descargable "
+        "para análisis ejecutivo, proyección y uso posterior con otro LLM.\n\n"
+        "Reglas:\n"
+        "- Escribe en español profesional y accionable.\n"
+        "- Separa evidencia del reporte, inferencias y recomendaciones.\n"
+        "- No inventes datos externos.\n"
+        "- Si una conclusión depende de poca evidencia, marca confianza baja.\n"
+        "- Optimiza para que Manuel pueda usar el archivo como entrada de otro LLM.\n\n"
+        "Entrega en Markdown con estas secciones exactas:\n"
+        "1. Lectura ejecutiva\n"
+        "2. Pregunta original y preguntas base que responde el reporte\n"
+        "3. Patrones principales detectados\n"
+        "4. Predicciones y escenarios probables\n"
+        "5. Señales que conviene monitorear\n"
+        "6. Oportunidades comerciales inmediatas\n"
+        "7. Riesgos, sesgos e incertidumbres\n"
+        "8. Próximas preguntas para MiroFish\n"
+        "9. Prompt recomendado para análisis profundo en otro LLM\n"
+        "10. Confianza general\n\n"
+        f"METADATOS:\n"
+        f"report_id: {report.report_id}\n"
+        f"simulation_id: {report.simulation_id}\n"
+        f"graph_id: {report.graph_id}\n"
+        f"created_at: {report.created_at}\n"
+        f"completed_at: {report.completed_at}\n"
+        f"simulation_requirement:\n{report.simulation_requirement}\n\n"
+        f"OUTLINE:\n{json.dumps(outline, ensure_ascii=False, indent=2)}\n\n"
+        f"REPORTE COMPLETO:\n{report_markdown}\n"
+    )
+
+    try:
+        analysis_markdown = LLMClient().chat(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Eres Profesor Futuro. Eres riguroso, práctico y enfocado en predicción de negocio."
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.35,
+            max_tokens=FUTURE_ANALYSIS_MAX_TOKENS,
+        )
+    except Exception as e:
+        logger.warning(f"Profesor Futuro falló para report={report.report_id}: {e}")
+        analysis_markdown = _fallback_future_analysis(report)
+    analysis_markdown = _strip_markdown_fence(analysis_markdown)
+
+    payload = {
+        "report_id": report.report_id,
+        "simulation_id": report.simulation_id,
+        "graph_id": report.graph_id,
+        "generated_at": datetime.now().isoformat(),
+        "analysis_markdown": analysis_markdown,
+        "report": report.to_dict(),
+    }
+
+    with open(md_path, 'w', encoding='utf-8') as f:
+        f.write(analysis_markdown)
+    with open(json_path, 'w', encoding='utf-8') as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+    return analysis_markdown, payload, False
 
 
 # ============== Interfaz de generación de reportes ==============
@@ -438,6 +571,44 @@ def download_report(report_id: str):
         
     except Exception as e:
         logger.error(f"Error al descargar el reporte: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+
+
+@report_bp.route('/<report_id>/future-analysis', methods=['POST'])
+def generate_future_analysis(report_id: str):
+    """
+    Generar análisis descargable tipo Profesor Futuro para un reporte existente.
+    """
+    try:
+        data = request.get_json() or {}
+        force = bool(data.get("force", False))
+
+        report = ReportManager.get_report(report_id)
+        if not report:
+            return jsonify({
+                "success": False,
+                "error": f"El reporte no existe: {report_id}"
+            }), 404
+
+        analysis_markdown, payload, cached = _generate_future_analysis(report, force=force)
+
+        return jsonify({
+            "success": True,
+            "data": {
+                "report_id": report_id,
+                "simulation_id": report.simulation_id,
+                "cached": cached,
+                "analysis_markdown": analysis_markdown,
+                "payload": payload,
+            }
+        })
+
+    except Exception as e:
+        logger.error(f"Error al generar análisis Profesor Futuro: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e),

@@ -13,6 +13,18 @@
             </div>
             <h1 class="main-title">{{ reportOutline.title }}</h1>
             <p class="sub-title">{{ reportOutline.summary }}</p>
+            <div class="report-export-actions">
+              <button class="report-export-btn primary" @click="downloadFutureProfessorAnalysis" :disabled="isAnalyzingReport">
+                <span v-if="isAnalyzingReport" class="loading-spinner small"></span>
+                <span v-else>Profesor Futuro</span>
+              </button>
+              <button class="report-export-btn" @click="downloadPredictionReport">
+                Descargar informe
+              </button>
+              <button class="report-export-btn" @click="downloadReportDataJson">
+                Datos JSON
+              </button>
+            </div>
             <div class="header-divider"></div>
           </div>
 
@@ -484,7 +496,7 @@
 
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
-import { chatWithReport, getReport, getAgentLog } from '../api/report'
+import { chatWithReport, getReport, getAgentLog, generateFutureAnalysis } from '../api/report'
 import { interviewAgents, getSimulationProfilesRealtime } from '../api/simulation'
 
 const props = defineProps({
@@ -532,6 +544,8 @@ const SURVEY_STOPWORDS = new Set([
 
 // Report Data
 const reportOutline = ref(null)
+const reportData = ref(null)
+const isAnalyzingReport = ref(false)
 const generatedSections = ref({})
 const collapsedSections = ref(new Set())
 const currentSectionIndex = ref(null)
@@ -1278,6 +1292,86 @@ const downloadSurveySummary = () => {
   )
 }
 
+const buildReportExportPayload = () => {
+  const outline = reportData.value?.outline || reportOutline.value || null
+  const sectionPayload = Object.entries(generatedSections.value)
+    .sort(([a], [b]) => Number(a) - Number(b))
+    .map(([sectionIndex, content]) => ({
+      section_index: Number(sectionIndex),
+      title: outline?.sections?.[Number(sectionIndex) - 1]?.title || `Sección ${sectionIndex}`,
+      content
+    }))
+
+  return {
+    generated_at: new Date().toISOString(),
+    report_id: props.reportId,
+    simulation_id: props.simulationId || reportData.value?.simulation_id || null,
+    graph_id: reportData.value?.graph_id || null,
+    simulation_requirement: reportData.value?.simulation_requirement || '',
+    status: reportData.value?.status || null,
+    created_at: reportData.value?.created_at || null,
+    completed_at: reportData.value?.completed_at || null,
+    outline,
+    sections: sectionPayload,
+    markdown_content: reportData.value?.markdown_content || sectionPayload.map(section => `## ${section.title}\n\n${section.content}`).join('\n\n'),
+    professor_future_prompt: [
+      'Analiza este reporte de predicción como Profesor Futuro.',
+      'Extrae preguntas base, patrones, señales predictivas, escenarios probables, oportunidades comerciales, riesgos e incertidumbres.',
+      'Separa evidencia del reporte, inferencias y recomendaciones.',
+      'Devuelve próximos experimentos y métricas que conviene monitorear.'
+    ].join(' ')
+  }
+}
+
+const downloadPredictionReport = () => {
+  if (!props.reportId) return
+
+  const a = document.createElement('a')
+  a.href = `/api/report/${props.reportId}/download?format=md`
+  a.download = `${props.reportId}.md`
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+}
+
+const downloadReportDataJson = () => {
+  if (!props.reportId) return
+
+  const now = new Date()
+  const payload = buildReportExportPayload()
+  downloadFile(
+    JSON.stringify(payload, null, 2),
+    `reporte_datos_${props.reportId}_${now.toISOString().slice(0, 10)}.json`,
+    'application/json;charset=utf-8'
+  )
+}
+
+const downloadFutureProfessorAnalysis = async () => {
+  if (!props.reportId || isAnalyzingReport.value) return
+
+  isAnalyzingReport.value = true
+  addLog(`Profesor Futuro analizando reporte: ${props.reportId}`)
+
+  try {
+    const res = await generateFutureAnalysis(props.reportId, { force: false })
+    if (!res.success || !res.data?.analysis_markdown) {
+      throw new Error(res.error || 'No se pudo generar el análisis Profesor Futuro')
+    }
+
+    const now = new Date()
+    downloadFile(
+      res.data.analysis_markdown,
+      `profesor_futuro_${props.reportId}_${now.toISOString().slice(0, 10)}.md`,
+      'text/markdown;charset=utf-8'
+    )
+    addLog(`Análisis Profesor Futuro descargado${res.data.cached ? ' desde caché' : ''}`)
+  } catch (err) {
+    addLog(`Error en Profesor Futuro: ${err.message}`)
+  } finally {
+    isAnalyzingReport.value = false
+  }
+}
+
 // Load Report Data
 const loadReportData = async () => {
   if (!props.reportId) return
@@ -1288,6 +1382,10 @@ const loadReportData = async () => {
     // Get report info
     const reportRes = await getReport(props.reportId)
     if (reportRes.success && reportRes.data) {
+      reportData.value = reportRes.data
+      if (reportRes.data.outline) {
+        reportOutline.value = reportRes.data.outline
+      }
       // Load agent logs to get report outline and sections
       await loadAgentLogs()
     }
@@ -1357,6 +1455,10 @@ onUnmounted(() => {
 
 watch(() => props.reportId, (newId) => {
   if (newId) {
+    reportData.value = null
+    reportOutline.value = null
+    generatedSections.value = {}
+    collapsedSections.value = new Set()
     loadReportData()
   }
 }, { immediate: true })
@@ -1477,6 +1579,44 @@ watch(() => props.simulationId, (newId) => {
   line-height: 1.6;
   margin: 0 0 30px 0;
   font-weight: 400;
+}
+
+.report-export-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: -10px 0 28px;
+}
+
+.report-export-btn {
+  min-height: 36px;
+  padding: 8px 13px;
+  border: 1px solid #D1D5DB;
+  border-radius: 6px;
+  background: #FFFFFF;
+  color: #1F2937;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.report-export-btn:hover:not(:disabled) {
+  background: #F3F4F6;
+}
+
+.report-export-btn.primary {
+  background: #111827;
+  border-color: #111827;
+  color: #FFFFFF;
+}
+
+.report-export-btn.primary:hover:not(:disabled) {
+  background: #374151;
+}
+
+.report-export-btn:disabled {
+  opacity: 0.7;
+  cursor: wait;
 }
 
 .header-divider {
@@ -2794,6 +2934,11 @@ watch(() => props.simulationId, (newId) => {
   border-top-color: #FFFFFF;
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
+}
+
+.loading-spinner.small {
+  width: 14px;
+  height: 14px;
 }
 
 @keyframes spin {

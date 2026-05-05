@@ -43,6 +43,15 @@ export const getReport = (reportId) => {
 }
 
 /**
+ * Generar análisis Profesor Futuro para un reporte existente
+ * @param {string} reportId
+ * @param {Object} data - { force? }
+ */
+export const generateFutureAnalysis = (reportId, data = {}) => {
+  return requestWithRetry(() => service.post(`/api/report/${reportId}/future-analysis`, data), 2, 1000)
+}
+
+/**
  * 与 Report Agent 对话
  * @param {Object} data - { simulation_id, message, chat_history? }
  */
