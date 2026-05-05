@@ -439,6 +439,17 @@
                   <p>{{ surveyConsensus.projection }}</p>
                 </div>
               </div>
+              <div class="survey-export-actions">
+                <button class="survey-export-btn primary" @click="downloadSurveySummary">
+                  Descargar resumen para IA
+                </button>
+                <button class="survey-export-btn" @click="downloadSurveyJson">
+                  Descargar datos JSON
+                </button>
+                <button class="survey-export-btn" @click="downloadSurveyResults">
+                  Descargar respuestas TXT
+                </button>
+              </div>
             </div>
             <div class="results-list">
               <div 
@@ -2939,6 +2950,41 @@ watch(() => props.simulationId, (newId) => {
   color: #374151;
   font-size: 13px;
   line-height: 1.55;
+}
+
+.survey-export-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid #EEF2F7;
+}
+
+.survey-export-btn {
+  min-height: 38px;
+  padding: 9px 14px;
+  border: 1px solid #D1D5DB;
+  border-radius: 6px;
+  background: #FFFFFF;
+  color: #1F2937;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.survey-export-btn:hover {
+  background: #F3F4F6;
+}
+
+.survey-export-btn.primary {
+  background: #111827;
+  border-color: #111827;
+  color: #FFFFFF;
+}
+
+.survey-export-btn.primary:hover {
+  background: #374151;
 }
 
 .results-list {
